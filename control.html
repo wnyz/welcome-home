@@ -60,6 +60,24 @@
         </div>
       </section>
 
+      <section class="card" id="online">
+        <h2>Share live</h2>
+        <label class="toggle">
+          <input type="checkbox" id="onlineOn">
+          <span class="switch" aria-hidden="true"></span>
+          <span>Send to viewers on other computers</span>
+        </label>
+        <div class="saveview-row">
+          <input class="share-input" id="shareLink" readonly aria-label="Viewer link to share">
+          <button class="btn primary" id="copyLink" type="button">Copy link</button>
+        </div>
+        <div class="saveview-row">
+          <span class="hint" id="onlineStatus" role="status">off</span>
+          <button class="btn" id="newRoom" type="button">New room code</button>
+        </div>
+        <p class="hint">Anyone who opens this link (a friend's laptop, the projector computer, OBS's browser source) sees what you control here, live. It goes through a free public relay, so share it only with people you trust, and keep the Chrome window capture as a backup for the show.</p>
+      </section>
+
       <section class="card" id="cameraCard">
         <h2>Camera</h2>
         <div class="presets-cam" id="cameraPresets"></div>

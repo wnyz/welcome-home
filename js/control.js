@@ -6,6 +6,7 @@ import {
 } from './config.js';
 import { CAMERA_PRESETS, presetById } from './presets.js';
 import { SONG_SCENES } from './songs.js';
+import { relaySender, newRoomCode } from './relay.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -49,6 +50,7 @@ function push(ease = false) {
   requestAnimationFrame(() => {
     pending = false;
     channel?.postMessage({ type: 'state', state, ease: pendingEase });
+    relay?.send('state', { state, ease: pendingEase }, true);
     pendingEase = false;
   });
 }
@@ -298,9 +300,10 @@ $('#reset').addEventListener('click', () => {
   selectedSong = 0;
   render(); push(true);
   channel?.postMessage({ type: 'restart' });
+  resetClock();
 });
 
-$('#restart').addEventListener('click', () => channel?.postMessage({ type: 'restart' }));
+$('#restart').addEventListener('click', () => { channel?.postMessage({ type: 'restart' }); resetClock(); });
 $('#openViewer').addEventListener('click', () => window.open('viewer.html', 'whnvr-viewer'));
 
 // performance keys (ignored while typing / dragging a slider)
@@ -321,6 +324,91 @@ window.addEventListener('keydown', (e) => {
     const idx = PRESET_KEYS.indexOf(e.key);
     if (idx >= 0 && CAMERA_PRESETS[idx]) { applyPreset(CAMERA_PRESETS[idx].id); render(); push(true); }
   }
+});
+
+// ------------------------------------------------------------- show clock
+// The controller keeps the one clock every viewer follows (loop time plus
+// island turn, bird and cloud phases), so viewers on different computers show
+// the same moment. Survives a reload of this page.
+
+const CLOCK_KEY = 'whnvr-liminal-landing/clock';
+let clock = { t: 0, angle: 0, bird: 0, cloud: 0 };
+try {
+  const c = JSON.parse(localStorage.getItem(CLOCK_KEY));
+  if (c && typeof c.t === 'number') {
+    const dt = state.autoAnimate ? Math.max(0, (Date.now() - c.wall) / 1000) : 0;
+    clock = { t: c.t + dt, angle: c.angle + state.rotationSpeed * Math.PI * 2 / LOOP_SECONDS * dt, bird: c.bird + state.birdSpeed * dt / LOOP_SECONDS, cloud: c.cloud + state.cloudDrift * dt / LOOP_SECONDS };
+  }
+} catch { /* fresh clock */ }
+let clockLast = performance.now();
+function tickClock() {
+  const now = performance.now();
+  const dt = Math.min(1, (now - clockLast) / 1000);
+  clockLast = now;
+  if (!state.autoAnimate) return;
+  clock.t += dt;
+  clock.angle = (clock.angle + state.rotationSpeed * Math.PI * 2 / LOOP_SECONDS * dt) % (Math.PI * 2);
+  clock.bird = (clock.bird + state.birdSpeed * dt / LOOP_SECONDS) % 1;
+  clock.cloud = (clock.cloud + state.cloudDrift * dt / LOOP_SECONDS) % 1;
+}
+function sendClock() {
+  tickClock();
+  const msg = { t: clock.t, angle: clock.angle, bird: clock.bird, cloud: clock.cloud };
+  channel?.postMessage({ type: 'clock', ...msg });
+  relay?.send('clock', msg, true);
+  try { localStorage.setItem(CLOCK_KEY, JSON.stringify({ ...msg, wall: Date.now() })); } catch { /* private mode */ }
+}
+function resetClock() { clock = { t: 0, angle: 0, bird: 0, cloud: 0 }; clockLast = performance.now(); sendClock(); }
+setInterval(tickClock, 100);
+setInterval(sendClock, 2000);
+
+// ------------------------------------------------------------- share live (relay)
+
+const ROOM_KEY = 'whnvr-liminal-landing/room';
+const ONLINE_KEY = 'whnvr-liminal-landing/online';
+let roomCode = localStorage.getItem(ROOM_KEY) || newRoomCode();
+try { localStorage.setItem(ROOM_KEY, roomCode); } catch { /* private mode */ }
+let relay = null;
+const onlineBox = $('#onlineOn');
+const onlineStatus = $('#onlineStatus');
+const shareLink = $('#shareLink');
+const viewerUrl = () => new URL(`viewer.html?room=${roomCode}&w=1920&h=1080`, location.href).href;
+
+function setOnlineStatus(n) {
+  const local = /^(localhost|127\.|0\.0\.0\.0)/.test(location.hostname);
+  onlineStatus.dataset.ok = String(n > 0);
+  onlineStatus.textContent = !relay ? 'off'
+    : n > 0 ? `live · room ${roomCode}${local ? ' · this is a localhost link: use the github.io controller to share' : ''}`
+      : 'connecting…';
+}
+function startRelay() {
+  relay?.close();
+  relay = relaySender(roomCode, setOnlineStatus);
+  setOnlineStatus(0);
+  // once connected, send the current scene + clock (kept by the relay for late joiners)
+  const first = setInterval(() => {
+    if (!relay) { clearInterval(first); return; }
+    if (relay.connected) { clearInterval(first); push(); sendClock(); }
+  }, 300);
+}
+function stopRelay() { relay?.close(); relay = null; setOnlineStatus(0); }
+
+shareLink.value = viewerUrl();
+onlineBox.checked = localStorage.getItem(ONLINE_KEY) !== 'off';
+if (onlineBox.checked) startRelay(); else setOnlineStatus(0);
+onlineBox.addEventListener('change', () => {
+  try { localStorage.setItem(ONLINE_KEY, onlineBox.checked ? 'on' : 'off'); } catch { /* private mode */ }
+  if (onlineBox.checked) startRelay(); else stopRelay();
+});
+$('#copyLink').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(shareLink.value); onlineStatus.textContent = 'link copied'; setTimeout(() => setOnlineStatus(relay?.connected || 0), 2000); }
+  catch { shareLink.select(); }
+});
+$('#newRoom').addEventListener('click', () => {
+  roomCode = newRoomCode();
+  try { localStorage.setItem(ROOM_KEY, roomCode); } catch { /* private mode */ }
+  shareLink.value = viewerUrl();
+  if (relay) startRelay();
 });
 
 // ------------------------------------------------------------- status

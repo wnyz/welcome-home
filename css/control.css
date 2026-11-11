@@ -385,3 +385,11 @@ kbd {
 }
 .saveview select:focus-visible { outline: 2px solid var(--yellow); outline-offset: 2px; }
 .songlist .saved-mark { color: var(--red); margin-right: 4px; }
+
+/* share live */
+.share-input {
+  flex: 1 1 220px; min-width: 0; font: 12px var(--mono); color: var(--ink); background: var(--paper);
+  border: var(--line); border-radius: 0; padding: 7px 8px;
+}
+#onlineStatus { flex: 1 1 auto; }
+#onlineStatus[data-ok="true"] { color: var(--green); }

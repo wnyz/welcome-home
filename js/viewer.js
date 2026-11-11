@@ -12,6 +12,7 @@ import { createBirds } from './birds.js';
 import { createCameraRig } from './camera.js';
 import { createFreecam } from './freecam.js'; // TEMP free camera
 import { presetById, TOUR, TOUR_SECONDS } from './presets.js';
+import { relayListener } from './relay.js';
 
 THREE.ColorManagement.enabled = false; // treat every hex color as-is, like ink on paper
 const TAU = Math.PI * 2;
@@ -406,12 +407,41 @@ function applyState(s, ease) {
 
 // ------------------------------------------------------------- sync
 
+// The show clock comes from the controller, so every viewer (here or on
+// another computer) is at the same moment of the loop. Small drift is left
+// alone; anything bigger snaps into line.
+const wrapD = (d, p) => ((((d % p) + p * 1.5) % p) - p / 2);
+let clockSynced = false;
+function syncClock(c) {
+  const lat = 0.15;   // rough network delay
+  const speedT = target.autoAnimate ? lat : 0;
+  const ct = c.t + speedT;
+  if (!clockSynced || Math.abs(wrapD(ct - t, LOOP_SECONDS)) > 0.35) t = ct;
+  const ca = c.angle + (target.autoAnimate ? target.rotationSpeed * TAU / LOOP_SECONDS * lat : 0);
+  if (!clockSynced || Math.abs(wrapD(ca - angle, TAU)) > 0.03) angle = ca;
+  const cb = c.bird + (target.autoAnimate ? target.birdSpeed * lat / LOOP_SECONDS : 0);
+  if (!clockSynced || Math.abs(wrapD(cb - birdPhase, 1)) > 0.003) birdPhase = cb;
+  const cc = c.cloud + (target.autoAnimate ? target.cloudDrift * lat / LOOP_SECONDS : 0);
+  if (!clockSynced || Math.abs(wrapD(cc - cloudPhase, 1)) > 0.003) cloudPhase = cc;
+  clockSynced = true;
+}
+
+// ?room=CODE: also follow a controller on another computer, through the relay
+const room = params.get('room');
+if (room) {
+  relayListener(room, (kind, data) => {
+    if (kind === 'state' && data.state) applyState(data.state, !!data.ease);
+    else if (kind === 'clock') syncClock(data);
+  });
+}
+
 const channel = 'BroadcastChannel' in window ? new BroadcastChannel(CHANNEL_NAME) : null;
 let fps = 60;
 if (channel) {
   channel.onmessage = (e) => {
     const m = e.data || {};
     if (m.type === 'state') applyState(m.state, !!m.ease);
+    else if (m.type === 'clock') syncClock(m);
     else if (m.type === 'restart') { t = 0; angle = 0; birdPhase = 0; cloudPhase = 0; }
     else if (m.type === 'captureView') channel.postMessage({ type: 'view', song: m.song, view: captureView() });
     else if (m.type === 'hello' && m.from === 'control') sendStatus();
