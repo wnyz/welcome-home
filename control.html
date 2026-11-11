@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Cpath d=%27M2 9 8 3l6 6v5H2z%27 fill=%27%23f2e8d2%27 stroke=%27%231c3a9a%27/%3E%3Cpath d=%27M1 9.5 8 2.5l7 7%27 fill=%27none%27 stroke=%27%23ea2b1f%27 stroke-width=%271.6%27/%3E%3C/svg%3E">
+  <title>Control — A Temporary Island</title>
+  <link rel="stylesheet" href="css/control.css">
+</head>
+<body>
+  <header class="top">
+    <div class="title">
+      <p class="eyebrow">whnvr · Liminal Landing</p>
+      <h1>A Temporary Island <span>control</span></h1>
+    </div>
+    <div class="status" id="status" data-live="false">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="statusText">viewer not open</span>
+      <div class="loopbar" aria-hidden="true"><i id="loopFill"></i></div>
+    </div>
+  </header>
+
+  <div class="sky" id="skyPreview" aria-hidden="true"></div>
+
+  <main class="layout">
+
+    <!-- ===================== performance column ===================== -->
+    <div class="col col-perform">
+
+      <section class="card" id="songs">
+        <h2>Song scenes</h2>
+        <div class="now">
+          <div><span class="label">Active</span><strong id="activeSong">—</strong></div>
+          <div><span class="label">Camera</span><span id="activeCamera">—</span></div>
+        </div>
+        <ol class="songlist" id="songList" aria-label="Song scenes"></ol>
+        <div class="row-buttons">
+          <button class="btn" id="prevScene" type="button">◀ Prev</button>
+          <button class="btn primary" id="activateScene" type="button">Activate selected</button>
+          <button class="btn" id="nextScene" type="button">Next ▶</button>
+        </div>
+        <div class="field">
+          <div class="row"><label for="transition2">Transition duration</label><output data-for="transition"></output></div>
+          <input type="range" id="transition2" data-key="transition" min="0.5" max="15" step="0.1">
+        </div>
+        <p class="hint">Keys: <kbd>←</kbd> <kbd>→</kbd> previous / next scene, <kbd>Enter</kbd> activate selected.</p>
+
+        <div class="saveview">
+          <h3>Save camera view, time + sky</h3>
+          <p class="hint">Frame a shot in the viewer (drag to orbit, right-drag to pan, scroll to zoom, or use the camera sliders), set the Time slider and the sky colors, pick a song, then save. That song will open on this view, at this hour, under this sky.</p>
+          <div class="saveview-row">
+            <select id="viewSong" aria-label="Song to save the view to"></select>
+            <button class="btn primary" id="saveView" type="button">Save view</button>
+            <button class="btn" id="clearView" type="button">Clear</button>
+          </div>
+          <div class="saveview-row">
+            <button class="btn" id="copyViews" type="button">Copy saved views as code</button>
+            <span class="hint" id="viewMsg" role="status"></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="cameraCard">
+        <h2>Camera</h2>
+        <div class="presets-cam" id="cameraPresets"></div>
+        <div class="field">
+          <div class="row"><label for="zoom">Zoom</label><output data-for="zoom"></output></div>
+          <input type="range" id="zoom" data-key="zoom" data-scale="log" min="0.3" max="24" step="0.001">
+        </div>
+        <div class="field">
+          <div class="row"><label for="cameraAngle">Camera angle</label><output data-for="cameraAngle"></output></div>
+          <input type="range" id="cameraAngle" data-key="cameraAngle" min="-10" max="85" step="0.5">
+        </div>
+        <div class="field">
+          <div class="row"><label for="cameraOrbit">Orbit</label><output data-for="cameraOrbit"></output></div>
+          <input type="range" id="cameraOrbit" data-key="cameraOrbit" min="-180" max="180" step="1">
+        </div>
+        <div class="field">
+          <div class="row"><label for="transition">Camera transition duration</label><output data-for="transition"></output></div>
+          <input type="range" id="transition" data-key="transition" min="0.5" max="15" step="0.1">
+        </div>
+        <label class="toggle">
+          <input type="checkbox" data-key="tour">
+          <span class="switch" aria-hidden="true"></span>
+          <span>Autonomous camera tour <em class="hint-inline">(every 30 s)</em></span>
+        </label>
+        <p class="hint">Keys: <kbd>1</kbd>–<kbd>9</kbd>, <kbd>0</kbd>, <kbd>-</kbd> jump to presets 01–11.</p>
+      </section>
+    </div>
+
+    <!-- ===================== world column ===================== -->
+    <div class="col col-world">
+
+      <section class="card">
+        <h2>Motion</h2>
+        <label class="toggle">
+          <input type="checkbox" data-key="autoAnimate">
+          <span class="switch" aria-hidden="true"></span>
+          <span>Auto-animation</span>
+        </label>
+        <div class="field">
+          <div class="row"><label for="rotationSpeed">Island rotation</label><output data-for="rotationSpeed"></output></div>
+          <input type="range" id="rotationSpeed" data-key="rotationSpeed" data-snap="1" min="-3" max="3" step="0.05">
+        </div>
+        <div class="field">
+          <div class="row"><label for="floatIntensity">Floating / Displacement</label><output data-for="floatIntensity"></output></div>
+          <input type="range" id="floatIntensity" data-key="floatIntensity" min="0" max="5" step="0.01">
+          <div class="scale" aria-hidden="true"><span>float</span><span>separate</span><span>disassemble</span><span>scatter</span></div>
+        </div>
+        <div class="field">
+          <div class="row"><label for="birdSpeed">Bird movement speed</label><output data-for="birdSpeed"></output></div>
+          <input type="range" id="birdSpeed" data-key="birdSpeed" data-snap="1" min="0" max="3" step="0.05">
+        </div>
+        <p class="hint">Whole numbers on rotation and bird speed loop seamlessly in 2:00.</p>
+      </section>
+
+      <section class="card">
+        <h2>World</h2>
+        <div class="toggles">
+          <label class="toggle"><input type="checkbox" data-key="showMain"><span class="switch" aria-hidden="true"></span><span>Main islands</span></label>
+          <label class="toggle"><input type="checkbox" data-key="showSatellites"><span class="switch" aria-hidden="true"></span><span>Satellite islands</span></label>
+          <label class="toggle"><input type="checkbox" data-key="birdsVisible"><span class="switch" aria-hidden="true"></span><span>Birds</span></label>
+          <label class="toggle"><input type="checkbox" data-key="airplane"><span class="switch" aria-hidden="true"></span><span>Airplane</span></label>
+        </div>
+        <div class="field">
+          <div class="row"><label for="houseCount">Houses per island</label><output data-for="houseCount"></output></div>
+          <input type="range" id="houseCount" data-key="houseCount" min="0" max="12" step="1">
+        </div>
+        <div class="field">
+          <div class="row"><label for="birdCount">Bird count</label><output data-for="birdCount"></output></div>
+          <input type="range" id="birdCount" data-key="birdCount" min="0" max="16" step="1">
+        </div>
+        <button class="btn" id="rearrange" type="button">Rearrange houses</button>
+        <div class="field">
+          <span class="label">Scattering</span>
+          <div class="segmented" id="scatterButtons">
+            <button type="button" data-float="1">Gather</button>
+            <button type="button" data-float="2.2">Loosen</button>
+            <button type="button" data-float="3.6">Disassemble</button>
+            <button type="button" data-float="5">Scatter</button>
+          </div>
+        </div>
+      </section>
+
+
+      <section class="card wide">
+        <h2>Atmosphere</h2>
+        <div class="presets" id="presets"></div>
+        <div class="colors">
+          <label class="swatch"><input type="color" data-key="bgTop"><span>Top</span></label>
+          <label class="swatch"><input type="color" data-key="bgMid"><span>Middle</span></label>
+          <label class="swatch"><input type="color" data-key="bgBottom"><span>Bottom</span></label>
+        </div>
+        <div class="two">
+          <div class="field">
+            <div class="row"><label for="twHour">Time</label><output data-for="twHour"></output></div>
+            <input type="range" id="twHour" data-key="twHour" min="0" max="23" step="1">
+          </div>
+          <div class="field">
+            <div class="row"><label for="darkness">Night darkness</label><output data-for="darkness"></output></div>
+            <input type="range" id="darkness" data-key="darkness" min="0" max="1" step="0.01">
+          </div>
+          <div class="field">
+            <div class="row"><label for="split">Split sky</label><output data-for="split"></output></div>
+            <input type="range" id="split" data-key="split" min="0" max="1" step="0.01">
+          </div>
+          <div class="field">
+            <div class="row"><label for="windowLight">Window light</label><output data-for="windowLight"></output></div>
+            <input type="range" id="windowLight" data-key="windowLight" min="0" max="1" step="0.01">
+          </div>
+          <div class="field">
+            <div class="row"><label for="clouds">Clouds</label><output data-for="clouds"></output></div>
+            <input type="range" id="clouds" data-key="clouds" min="0" max="1" step="0.01">
+          </div>
+          <div class="field">
+            <div class="row"><label for="cloudDensity">Cloud density</label><output data-for="cloudDensity"></output></div>
+            <input type="range" id="cloudDensity" data-key="cloudDensity" min="0" max="1" step="0.01">
+          </div>
+          <div class="field">
+            <div class="row"><label for="cloudOpacity">Cloud opacity</label><output data-for="cloudOpacity"></output></div>
+            <input type="range" id="cloudOpacity" data-key="cloudOpacity" min="0" max="1" step="0.01">
+          </div>
+          <div class="field">
+            <div class="row"><label for="cloudSoftness">Cloud softness</label><output data-for="cloudSoftness"></output></div>
+            <input type="range" id="cloudSoftness" data-key="cloudSoftness" min="0" max="1" step="0.01">
+          </div>
+          <div class="field">
+            <div class="row"><label for="cloudDrift">Cloud drift speed</label><output data-for="cloudDrift"></output></div>
+            <input type="range" id="cloudDrift" data-key="cloudDrift" data-snap="1" min="0" max="4" step="0.05">
+          </div>
+          <div class="field">
+            <div class="row"><label for="halftone">Halftone</label><output data-for="halftone"></output></div>
+            <input type="range" id="halftone" data-key="halftone" min="0" max="1" step="0.01">
+          </div>
+          <div class="field">
+            <div class="row"><label for="grain">Grain</label><output data-for="grain"></output></div>
+            <input type="range" id="grain" data-key="grain" min="0" max="1.5" step="0.01">
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Style</h2>
+        <div class="segmented" id="strokeButtons">
+          <button type="button" data-stroke="stroke">Stroke</button>
+          <button type="button" data-stroke="reduced">Reduced stroke</button>
+          <button type="button" data-stroke="none">No stroke</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Session</h2>
+        <button class="btn" id="openViewer" type="button">Open viewer</button>
+        <button class="btn" id="restart" type="button">Restart loop at 0:00</button>
+        <button class="btn danger" id="reset" type="button">Reset everything</button>
+        <p class="hint">Viewer keys: <kbd>f</kbd> fullscreen, <kbd>r</kbd> restart loop.</p>
+      </section>
+    </div>
+
+  </main>
+
+  <script type="module" src="js/control.js"></script>
+</body>
+</html>
