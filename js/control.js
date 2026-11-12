@@ -31,6 +31,9 @@ const fmt = {
   birdCount: v => String(v),
   timezone: v => v < 0.05 ? 'shared time' : pct(v),
   darkness: pct,
+  rain: pct,
+  snow: pct,
+  breathe: pct, quake: pct, ripple: pct,
   split: v => v < 0.02 ? 'blended' : v > 0.98 ? 'split' : pct(v),
   twHour: v => `${pad(Math.round(v) % 24)}:00 Taiwan · ${pad((Math.round(v) + 12) % 24)}:00 New York`,
   windowLight: pct, clouds: v => `${Math.round(v * 16)} / 16`,
@@ -77,7 +80,11 @@ const songKey = (s) => `${s.title}|${s.artist}`;
 let views = {};
 try { views = JSON.parse(localStorage.getItem(VIEWS_KEY)) || {}; } catch { views = {}; }
 const saveViews = () => { try { localStorage.setItem(VIEWS_KEY, JSON.stringify(views)); } catch { /* private mode */ } };
-const viewFor = (s) => views[songKey(s)] || null;
+// a song can bump viewVersion in songs.js to retire views saved before the change
+const viewFor = (s) => {
+  const v = views[songKey(s)];
+  return v && (v.ver || 1) >= (s.viewVersion || 1) ? v : null;
+};
 
 function applyView(v) {
   if (typeof v.time === 'number') state.twHour = v.time;
@@ -111,6 +118,7 @@ function activateScene(i) {
   if (typeof s.angle === 'number') state.cameraAngle = s.angle;
   if (typeof s.orbit === 'number') state.cameraOrbit = s.orbit;
   if (Array.isArray(s.pan)) [state.cameraPanX, state.cameraPanY, state.cameraPanZ] = s.pan;
+  state.split = 0;   // a song only gets the split sky if it asks for it
   if (typeof s.float === 'number') state.floatIntensity = s.float;
   if (s.birds) {
     if (typeof s.birds.count === 'number') state.birdCount = s.birds.count;
@@ -426,7 +434,7 @@ if (channel) {
     else if (m.type === 'state') { state = sanitize(m.state); saveState(state); render(); } // another controller
     else if (m.type === 'view' && m.song === pendingSave) {
       const s = SONG_SCENES[m.song];
-      views[songKey(s)] = { ...m.view, time: state.twHour, sky: [state.bgTop, state.bgMid, state.bgBottom] };
+      views[songKey(s)] = { ...m.view, time: state.twHour, sky: [state.bgTop, state.bgMid, state.bgBottom], ver: s.viewVersion || 1 };
       saveViews();
       pendingSave = null;
       // hold the captured view in the live state too

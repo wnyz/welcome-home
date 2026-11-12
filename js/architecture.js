@@ -6,13 +6,46 @@
 
 import * as THREE from 'three';
 import { C } from './config.js';
-import { toon, mesh, faceted, addWindow, SHAPE, LIGHTS, beamMaterial, billboardMaterial } from './materials.js';
+import { toon, mesh, faceted, addWindow, SHAPE, LIGHTS, beamMaterial, billboardMaterial, dreamyBoardMaterial, shared } from './materials.js';
 
 const TAU = Math.PI * 2;
 const OUT = 0.012; // how far windows sit off a wall
-export const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+// boxes of the same size share one geometry (thousands of boxes, a few hundred sizes)
+const boxCache = new Map();
+export const box = (w, h, d) => {
+  const key = `${w.toFixed(4)}|${h.toFixed(4)}|${d.toFixed(4)}`;
+  let g = boxCache.get(key);
+  if (!g) { g = new THREE.BoxGeometry(w, h, d); boxCache.set(key, g); }
+  return g;
+};
 const part = (o) => { o.userData.kind = 'part'; return o; };
 const basic = (color) => new THREE.MeshBasicMaterial({ color });
+
+// shop-sign color blocks: soft light ripples running out from the middle,
+// like a quieter portal. Shared per color + offset, so there are few materials.
+const signMats = new Map();
+function signMaterial(color, slot) {
+  const key = color + slot;
+  if (!signMats.has(key)) {
+    signMats.set(key, new THREE.ShaderMaterial({
+      uniforms: { uTime: shared.uTime, uLoop: shared.uLoop, uCol: { value: new THREE.Color(color) }, uOff: { value: slot / 4 } },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: /* glsl */`
+        uniform float uTime, uLoop, uOff;
+        uniform vec3 uCol;
+        varying vec2 vUv;
+        void main() {
+          float d = length((vUv - 0.5) * vec2(2.0, 1.0));
+          float x = 1.0 - abs(fract(d * 1.5 - uTime / uLoop * 10.0 + uOff) * 2.0 - 1.0);
+          vec3 col = mix(uCol * 0.82, mix(uCol, vec3(1.0), 0.3), smoothstep(0.2, 0.9, x));
+          gl_FragColor = vec4(col, 1.0);
+        }`,
+    }));
+  }
+  return signMats.get(key);
+}
 
 // Taiwan: corrugated tin colors, shop-sign color blocks, scooter paint
 const TIN = ['#2f6fd0', '#3aa6a0', '#c4583a', '#5b8fd9', '#d9d4c7', '#58ab6a', '#2f6fd0'];
@@ -108,8 +141,14 @@ function fireEscape(w, floors, fh) {
   const g = new THREE.Group();
   const iron = toon(C.ink);
   const pw = w * 0.62;
+  const bulbs = [];
   for (let f = 1; f < floors; f++) {
     const y = f * fh + 0.02;
+    const nb = Math.max(3, Math.round(pw / 0.16));
+    for (let i = 0; i <= nb && f % 2 === 1; i++) {
+      const t = i / nb;
+      bulbs.push(new THREE.Vector3(-pw / 2 + pw * t, y + 0.2 - 0.05 * Math.sin(Math.PI * t), 0.32));
+    }
     const plat = mesh(box(pw, 0.03, 0.3), iron, { edges: false });
     plat.position.set(0, y, 0.15);
     const rail = mesh(box(pw, 0.02, 0.02), iron, { edges: false });
@@ -129,6 +168,7 @@ function fireEscape(w, floors, fh) {
       g.add(ladder);
     }
   }
+  if (bulbs.length) g.add(stringLights(bulbs));   // Christmas lights on every balcony
   return part(g);
 }
 
@@ -293,9 +333,9 @@ export function nyTower(r, o = {}) {
       leg.position.set(sx * bw * 0.35, 0.18, 0);
       st.add(leg);
     }
-    const b = billboard(r, bw, bh);
+    const b = billboard(r, bw, bh, true);     // rooftop screens: the dreamy set
     b.position.y = 0.36 + bh / 2;
-    const b2 = billboard(r, bw, bh);     // screens on both faces
+    const b2 = billboard(r, bw, bh, true);   // screens on both faces
     b2.position.set(0, 0.36 + bh / 2, -0.046);
     b2.rotation.y = Math.PI;
     st.add(b, b2);
@@ -590,6 +630,82 @@ export function scooter(color = C.roofRed) {
   return part(g);
 }
 
+// A spiral staircase going nowhere: chunky steps curving up and round,
+// deep blue at the bottom fading to white and pink at the top.
+export function spiralStairs(n = 15) {
+  const g = new THREE.Group();
+  const bottom = new THREE.Color('#5ab4e8'), top = new THREE.Color('#f6d9da');
+  for (let k = 0; k < n; k++) {
+    const f = k / (n - 1);
+    const sh = 0.2, len = 1.05 - f * 0.25, dep = 0.42 - f * 0.08;
+    const col = '#' + bottom.clone().lerp(top, f).getHexString();
+    const s = mesh(box(len, sh, dep), toon(col, { colorB: '#3b62c4', grad: [-sh / 2, sh / 2] }));
+    const a = k * 0.44;
+    const rr = 0.42 + len / 2;
+    s.position.set(Math.cos(a) * rr, sh / 2 + k * sh, Math.sin(a) * rr);
+    s.rotation.y = -a;
+    g.add(part(s));
+  }
+  return g;
+}
+
+// A portal: a flat disc that only *looks* deep, the same trick as the
+// windows. For each pixel the shader follows the view a little way into an
+// imaginary tube behind the disc and colors it by how far back it lands:
+// rings of color that crowd together and darken toward a navy center, and
+// shift as the camera moves. The rings flow slowly inward (whole cycles per
+// loop). A flat warm rim with an ink edge goes round it. Faces +x.
+export function portal(R = 2.8) {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTime: shared.uTime, uLoop: shared.uLoop, uFrame: shared.uFrame },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: /* glsl */`
+      uniform float uTime, uLoop;
+      uniform vec3 uFrame;
+      varying vec2 vUv;
+      const float TAU = 6.28318530718;
+      // blue, lilac, pink, orange, and back again, so waves can repeat seamlessly
+      vec3 wave(float g) {
+        float x = 1.0 - abs(fract(g) * 2.0 - 1.0);       // 0..1..0
+        vec3 cBlue = vec3(0.0, 0.48, 1.0);
+        vec3 cLil  = vec3(0.88, 0.58, 1.0);
+        vec3 cPink = vec3(0.95, 0.6, 0.75);
+        vec3 cOr   = vec3(1.0, 0.53, 0.3);
+        vec3 col = mix(cBlue, cLil, smoothstep(0.0, 0.4, x));
+        col = mix(col, cPink, smoothstep(0.35, 0.7, x));
+        return mix(col, cOr, smoothstep(0.65, 1.0, x));
+      }
+      void main() {
+        vec2 p = vUv * 2.0 - 1.0;
+        float r = length(p);
+        if (r > 1.0) discard;
+        vec3 col;
+        {
+          // colour waves born in the middle and flowing outward, 12 per loop
+          float ph = uTime / uLoop;
+          col = wave(r * 0.85 - ph * 12.0);
+          // dark heart that breathes with each wave
+          float core = 0.22 + 0.04 * sin(TAU * 12.0 * ph);
+          col = mix(vec3(0.12, 0.13, 0.18), col, smoothstep(0.0, core * 1.6, r));
+        }
+        if (r > 0.97) col = uFrame;
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+    side: THREE.DoubleSide,
+  });
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(R, 72), mat);
+  disc.scale.set(1, 0.72, 1);             // an oval, like the reference
+  disc.rotation.y = Math.PI / 2;          // faces along x
+  const holder = new THREE.Group();
+  holder.add(disc);
+  return holder;
+}
+
 export function stairsToNowhere() {
   const g = new THREE.Group();
   for (let k = 0; k < 6; k++) {
@@ -728,60 +844,140 @@ export function lighthouse() {
   return { group: g, pivot, beamMaterial: bm };
 }
 
-// The airliner, as a flat graphic: a white body with swept wings, a pale
-// blue half, and a dark-blue offset shadow (like a print slightly off
-// register). Nose points along +z.
+// The airliner: one smooth body (rounded nose, long cabin, a tail that
+// slims and sweeps up into the fin), swept wings on a small fairing, two
+// tapered engines, stabilizers. Nose along +z.
 export function airplane() {
   const g = new THREE.Group();
-  const half = [
-    [0, 2.35], [0.17, 2.2], [0.25, 1.9], [0.25, 0.55], [2.35, -0.55], [2.42, -0.8],
-    [0.25, -0.35], [0.21, -1.55], [0.95, -2.12], [0.95, -2.3], [0.12, -2.08], [0.06, -2.4], [0, -2.4],
+  const white = toon(C.paper, { doubleSided: true });
+  const blue = toon('#8cbcff');
+  // body: a lathe profile (radius, length) from the tail tip to the nose
+  const prof = [
+    [0.0, -2.45], [0.07, -2.4], [0.13, -2.2], [0.2, -1.85], [0.27, -1.35], [0.3, -0.9],
+    [0.3, 1.3], [0.29, 1.6], [0.26, 1.85], [0.21, 2.05], [0.14, 2.2], [0.06, 2.3], [0.0, 2.33],
   ];
-  const outline = [...half, ...half.slice(1, -1).reverse().map(([x, y]) => [-x, y])];
-  const shp = new THREE.Shape(outline.map(([x, y]) => new THREE.Vector2(x, y)));
-  const geo = new THREE.ExtrudeGeometry(shp, { depth: 0.08, bevelEnabled: false });
-  geo.rotateX(Math.PI / 2);        // lie flat, nose toward +z
-  const flat = (c) => new THREE.MeshBasicMaterial({ color: c, side: THREE.DoubleSide });
-  const body = new THREE.Mesh(geo, flat('#ffffff'));
-  const shadow = new THREE.Mesh(geo, flat('#1b2a8a'));
-  shadow.position.set(-0.22, -0.5, 0.16);
-  g.add(shadow, body);
-  // the pale blue half of the fuselage
-  const tone = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.02, 3.6), flat('#8cbcff'));
-  tone.position.set(-0.12, 0.012, -0.3);
-  g.add(tone);
-  // engines in front of the wings, each with a little shadow of its own
-  for (const sx of [-1, 1]) {
-    const eng = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.12, 0.5), flat('#ffffff'));
-    eng.position.set(sx * 1.05, 0.02, 0.15);
-    const es = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.1, 0.5), flat('#1b2a8a'));
-    es.position.set(sx * 1.05 - 0.22, -0.48, 0.31);
-    g.add(es, eng);
+  const bodyGeo = new THREE.LatheGeometry(prof.map(([r, z]) => new THREE.Vector2(r, z)), 16);
+  bodyGeo.rotateX(Math.PI / 2);            // lathe axis (y) -> z, nose toward +z
+  const p = bodyGeo.attributes.position;
+  for (let i = 0; i < p.count; i++) {      // the tail sweeps up
+    const z = p.getZ(i);
+    if (z < -0.9) p.setY(i, p.getY(i) + Math.pow((-0.9 - z) / 1.55, 1.6) * 0.32);
   }
-  // cockpit windows
+  bodyGeo.computeVertexNormals();
+  const body = mesh(bodyGeo, white, { threshold: 35 });
+  g.add(body);
+  // cockpit windows and the pale blue cheat line
+  const cw = mesh(box(0.3, 0.06, 0.1), toon(C.ink), { edges: false });
+  cw.position.set(0, 0.17, 1.98);
+  cw.rotation.x = -0.5;
+  g.add(cw);
   for (const sx of [-1, 1]) {
-    const w = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.02, 0.08), flat('#1b2a8a'));
-    w.position.set(sx * 0.07, 0.012, 2.05);
+    const stripe = mesh(box(0.02, 0.06, 2.6), blue, { edges: false });
+    stripe.position.set(sx * 0.3, 0.03, 0.25);
+    g.add(stripe);
+  }
+  const slab = (pts, depth) => {
+    const geo = new THREE.ExtrudeGeometry(new THREE.Shape(pts.map(([x, y]) => new THREE.Vector2(x, y))), { depth, bevelEnabled: false });
+    geo.rotateX(Math.PI / 2);
+    geo.translate(0, depth / 2, 0);
+    return faceted(geo);
+  };
+  // wing-root fairing
+  const fair = mesh(faceted(new THREE.SphereGeometry(0.3, 12, 6)), white, { threshold: 40 });
+  fair.scale.set(1.15, 0.6, 2.4);
+  fair.position.set(0, -0.14, 0.05);
+  g.add(fair);
+  for (const sx of [-1, 1]) {
+    const w = mesh(slab([[0.15, 0.6], [2.3, -0.5], [2.4, -0.75], [0.15, -0.4]].map(([x, y]) => [x * sx, y]), 0.06), white);
+    w.position.y = -0.12;
+    w.rotation.z = sx * 0.06;              // a little dihedral
     g.add(w);
+    // engine: a tapered nacelle on a short pylon
+    const nac = mesh(new THREE.LatheGeometry([[0.0, -0.32], [0.08, -0.3], [0.12, -0.15], [0.14, 0.15], [0.13, 0.3], [0.1, 0.32]].map(([r, z]) => new THREE.Vector2(r, z)), 12), white, { threshold: 35 });
+    nac.geometry.rotateX(Math.PI / 2);
+    nac.geometry.computeVertexNormals();
+    nac.position.set(sx * 0.95, -0.3, 0.32);
+    const intake = mesh(new THREE.CircleGeometry(0.1, 12), toon(C.ink), { edges: false });
+    intake.position.set(sx * 0.95, -0.3, 0.645);
+    const pylon = mesh(box(0.04, 0.14, 0.3), white, { edges: false });
+    pylon.position.set(sx * 0.95, -0.18, 0.25);
+    g.add(nac, intake, pylon);
+    const stab = mesh(slab([[0.04, -1.7], [0.85, -2.2], [0.85, -2.33], [0.04, -2.15]].map(([x, y]) => [x * sx, y]), 0.04), white);
+    stab.position.y = 0.2;
+    g.add(stab);
   }
+  // tail fin
+  const finShape = new THREE.Shape([[-1.55, 0], [-2.35, 0], [-2.5, 1.0], [-2.2, 1.0]].map(([z, y]) => new THREE.Vector2(z, y)));
+  const finGeo = new THREE.ExtrudeGeometry(finShape, { depth: 0.05, bevelEnabled: false });
+  finGeo.rotateY(-Math.PI / 2);
+  finGeo.translate(-0.025, 0.24, 0);
+  g.add(mesh(faceted(finGeo), blue));
+  return g;
+}
+
+// ------------------------------------------------------------- street lights
+
+// Soft warm glow around lamps. The viewer fades every halo in with the
+// night on its side of the world (see LAMP_HALOS in viewer.js).
+export const LAMP_HALOS = [];
+let haloTexture = null;
+function haloTex() {
+  if (haloTexture) return haloTexture;
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const x = c.getContext('2d');
+  const gr = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,230,170,0.75)');
+  gr.addColorStop(0.3, 'rgba(255,200,120,0.3)');
+  gr.addColorStop(1, 'rgba(255,170,90,0)');
+  x.fillStyle = gr;
+  x.fillRect(0, 0, 64, 64);
+  haloTexture = new THREE.CanvasTexture(c);
+  return haloTexture;
+}
+export function lampHalo(size = 1.2, color = '#ffffff') {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: haloTex(), color, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  s.scale.setScalar(size);
+  s.renderOrder = 6;
+  s.visible = false;
+  LAMP_HALOS.push(s);
+  return s;
+}
+// A street lamp: pole, arm, warm head, and its night glow.
+export function streetLamp(h = 1.4) {
+  const g = new THREE.Group();
+  const pole = mesh(box(0.05, h, 0.05), toon(C.ink), { edges: false });
+  pole.position.y = h / 2;
+  const armM = mesh(box(0.04, 0.04, 0.34), toon(C.ink), { edges: false });
+  armM.position.set(0, h - 0.02, 0.15);
+  const head = mesh(box(0.11, 0.05, 0.17), basic('#ffe7a8'), { edges: false });
+  head.position.set(0, h - 0.05, 0.31);
+  const glow = lampHalo(1.2);
+  glow.position.set(0, h - 0.12, 0.31);
+  g.add(pole, armM, head, glow);
   return g;
 }
 
 // A tall ladder standing upright in the air, with a lit window floating at
 // the top: the ladder ends right at the sill. Returns the window too.
-export function ladderToWindow(H = 8) {
+export function ladderToWindow(H = 8, lean = 0.21) {
   const g = new THREE.Group();
   const wood = toon(C.paper);
+  const lad = new THREE.Group();          // the ladder leans; the window stays upright
   for (const sx of [-1, 1]) {
     const rail = mesh(box(0.07, H, 0.07), wood);
     rail.position.set(sx * 0.26, H / 2, 0);
-    g.add(rail);
+    lad.add(rail);
   }
   for (let y = 0.25; y < H - 0.1; y += 0.32) {
     const rung = mesh(box(0.5, 0.04, 0.05), wood, { edges: false });
     rung.position.set(0, y, 0);
-    g.add(rung);
+    lad.add(rung);
   }
+  lad.rotation.z = lean;
+  g.add(lad);
   const W = 1.5, Hw = 1.15, t = 0.1;
   const frame = new THREE.Group();
   const fc = toon(C.cream);
@@ -791,7 +987,7 @@ export function ladderToWindow(H = 8) {
   const rgt = mesh(box(t, Hw, t * 1.4), fc); rgt.position.set(W / 2 + t / 2, Hw / 2, 0);
   frame.add(top, sill, lft, rgt);
   const win = addWindow(frame, { y: Hw / 2, w: W, h: Hw, shape: SHAPE.CROSS, seed: 0.77, doubleSided: true, depth: 2.6, curtain: 0.4, light: LIGHTS.warm });
-  frame.position.set(0, H + 0.05, -0.12);
+  frame.position.set(-Math.sin(lean) * H, Math.cos(lean) * H + 0.05, -0.12);
   g.add(frame);
   return { group: g, frame, window: win };
 }
@@ -813,6 +1009,9 @@ export function bag(r, scale = 1) {
 }
 export function luggageHill(r, { radius = 1.7, height = 2.2 } = {}) {
   const g = new THREE.Group();
+  const anim = [];
+  g.userData.anim = anim;
+  let count = 0;
   // rings of bags, smaller and fewer toward the top
   const layers = 7;
   for (let i = 0; i < layers; i++) {
@@ -822,9 +1021,14 @@ export function luggageHill(r, { radius = 1.7, height = 2.2 } = {}) {
     for (let k = 0; k < n; k++) {
       const a = (k / n) * TAU + r.f(-0.2, 0.2) + i * 0.4;
       const b = bag(r, r.f(0.8, 1.15));
-      b.position.set(Math.cos(a) * rr * r.f(0.7, 1), f * height, Math.sin(a) * rr * r.f(0.7, 1));
+      const holder = new THREE.Group();     // the pile's place for it; the bag moves inside
+      holder.position.set(Math.cos(a) * rr * r.f(0.7, 1), f * height, Math.sin(a) * rr * r.f(0.7, 1));
       b.rotation.set(r.f(-0.35, 0.35), r.f(0, TAU), r.chance(0.35) ? Math.PI / 2 + r.f(-0.2, 0.2) : r.f(-0.3, 0.3));
-      g.add(part(b));
+      holder.add(b);
+      g.add(part(holder));
+      const h = fract1(Math.sin(++count * 91.7) * 4375.85);
+      const mode = (i === layers - 1 || (i === layers - 3 && k === 0)) ? 'float' : h < 0.4 ? 'jostle' : null;
+      if (mode) anim.push({ b, mode, rot: b.rotation.clone(), k: 2 + Math.floor(h * 10) % 4, off: h * 7 % 1, sign: h < 0.2 ? 1 : -1 });
     }
   }
   return g;
@@ -860,11 +1064,11 @@ export function islandPlinth(radial, n, colors, { stand = null, depthScale = 1 }
     s.closePath();
     return s;
   };
-  const slab = (scale, depth, color) => {
+  const slab = (scale, depth, color, puff = 0) => {
     const geo = new THREE.ExtrudeGeometry(outline(scale), { depth, bevelEnabled: false });
     geo.rotateX(-Math.PI / 2);
     geo.translate(0, -depth, 0);
-    return mesh(faceted(geo), toon(color));
+    return mesh(faceted(geo), toon(color, { puff }));
   };
   const top = slab(1, 0.28, colors.top);
   g.add(top);
@@ -872,7 +1076,7 @@ export function islandPlinth(radial, n, colors, { stand = null, depthScale = 1 }
   let y = -0.28;
   [[0.97, 0.9], [0.78, 1.0], [0.55, 1.1]].forEach(([scale, depth], i) => {
     depth *= depthScale;
-    const m = slab(scale, depth, colors.layers[i]);
+    const m = slab(scale, depth, colors.layers[i], 0.3 * depthScale);   // quilted, like a down jacket
     m.position.y = y;
     y -= depth;
     m.userData.baseRot = (i + 1) * 0.12;
@@ -904,12 +1108,13 @@ function shopSign(r, { w, h, t = 0.05, flat = false }) {
   // one to three stacked blocks on each face, alternating two colors
   const n = flat ? 1 : r.i(1, 3);
   const alt = r.pick(SIGN)[0];
+  const slot = r.i(0, 3);
   const pw = w * 0.8, ph = h * 0.86 / n;
   for (let k = 0; k < n; k++) {
     const col = k % 2 ? (alt === frame ? panel : alt) : panel;
     const y = -h * 0.43 + ph * (k + 0.5);
     for (const s of [-1, 1]) {
-      const pl = new THREE.Mesh(new THREE.PlaneGeometry(pw, ph * 0.9), basic(col));
+      const pl = new THREE.Mesh(new THREE.PlaneGeometry(pw, ph * 0.9), signMaterial(col, (k + slot) % 4));
       if (flat) { pl.position.set(0, y, s * (t / 2 + 0.003)); if (s < 0) pl.rotation.y = Math.PI; }
       else { pl.position.set(s * (t / 2 + 0.003), y, 0); pl.rotation.y = s * Math.PI / 2; }
       g.add(pl);
@@ -919,11 +1124,11 @@ function shopSign(r, { w, h, t = 0.05, flat = false }) {
 }
 
 // A Times Square screen: an abstract animated gradient in an ink frame.
-function billboard(r, w, h) {
+function billboard(r, w, h, dreamy = false) {
   const g = new THREE.Group();
   const back = mesh(box(w + 0.05, h + 0.05, 0.04), toon(C.ink), { edges: false });
   back.position.z = -0.022;
-  const screen = new THREE.Mesh(new THREE.PlaneGeometry(w, h), billboardMaterial(r.next()));
+  const screen = new THREE.Mesh(new THREE.PlaneGeometry(w, h), dreamy ? dreamyBoardMaterial(r.next()) : billboardMaterial(r.next()));
   screen.position.z = 0.001;
   g.add(back, screen);
   return part(g);
@@ -953,8 +1158,9 @@ export function mountainRange(r, ux, uz, { length = 7.5, width = 2.0, height = 3
       pos.setXYZ(i, x + o[0], y + o[1], z + o[2]);
     }
     const geo = faceted(raw);
-    const m = mesh(geo, toon(dark ? '#a9d98a' : '#c9e8a0', { colorB: dark ? '#3f8f3a' : '#58ab29', grad: [-hgt / 2, hgt / 2] }));
-    m.position.set(al * ux - pe * uz, hgt / 2 - 0.02, al * uz + pe * ux);
+    // double-sided + sunk into the ground, so overlapping peaks never show a hole
+    const m = mesh(geo, toon(dark ? '#a9d98a' : '#c9e8a0', { colorB: dark ? '#3f8f3a' : '#58ab29', grad: [-hgt / 2, hgt / 2], doubleSided: true }));
+    m.position.set(al * ux - pe * uz, hgt / 2 - 0.3, al * uz + pe * ux);
     m.rotation.y = r.f(0, TAU);
     m.scale.set(1, 1, r.f(0.75, 1.0));
     g.add(m);
@@ -1046,7 +1252,7 @@ export function flyingHouse(r) {
   const take = () => cols.splice(Math.floor(r.next() * cols.length), 1)[0];
   const wall = take(), roofC = take(), doorC = take();
 
-  const body = box(w, h, d);
+  const body = new THREE.BoxGeometry(w, h, d);   // its own copy: it gets sheared
   body.applyMatrix4(new THREE.Matrix4().makeShear(r.f(-0.06, 0.06), 0, 0, 0, 0, 0)); // hand-cut wobble
   g.add(mesh(body, toon(wall)));
 
@@ -1123,7 +1329,9 @@ export function subwayEntrance() {
     lp.position.set(sx * W / 2, 0.62, L / 2);
     const globe = new THREE.Mesh(new THREE.SphereGeometry(0.13, 14, 10), basic('#7dea8f'));
     globe.position.set(sx * W / 2, 1.36, L / 2);
-    g.add(lp, globe);
+    const glow = lampHalo(1.3, '#9dffb0');
+    glow.position.copy(globe.position);
+    g.add(lp, globe, glow);
   }
   const backRail = mesh(box(W, 0.04, 0.04), green);
   backRail.position.set(0, railH, -L / 2);
@@ -1188,10 +1396,15 @@ export function busStop(r) {
   const board = mesh(box(0.28, 0.4, 0.04), toon(C.yellow));
   board.position.set(-W / 2 - 0.45, 1.3, 0.15);
   g.add(pole, plate, inner, board);
+  const lamp = streetLamp(1.7);
+  lamp.position.set(W / 2 + 0.7, 0, 0.35);
+  lamp.rotation.y = Math.PI / 2;
+  g.add(lamp);
   // curb + a stripe of road
   const curb = mesh(box(W + 1.6, 0.06, 0.3), toon(C.sidewalk));
   curb.position.set(-0.2, 0.03, D / 2 + 0.25);
   g.add(curb);
+  g.userData.traffic = busStopTraffic(g, W);
   return g;
 }
 
@@ -1290,10 +1503,25 @@ export function manhattanGrid(isIn, { avenues, AW, streets, SW, main }) {
       armM.position.set(0, 1.28, -0.16);
       const head = mesh(box(0.1, 0.05, 0.16), basic('#ffe7a8'), { edges: false });
       head.position.set(0, 1.25, -0.32);
-      sl.add(pole, armM, head);
+      const glow = lampHalo(1.1);
+      glow.position.set(0, 1.18, -0.32);
+      sl.add(pole, armM, head, glow);
       sl.position.set(x, 0.07, z + side * (AW / 2 + 0.12));
       sl.rotation.y = side > 0 ? 0 : Math.PI;
       g.add(part(sl));
+    }
+  }
+
+  // lamps along the cross streets too
+  for (const x of streets) {
+    let k = 0;
+    for (let z = -3.4; z <= 3.4; z += 2.3, k++) {
+      if (avenues.some(az => Math.abs(z - az) < AW / 2 + 0.4) || !isIn(x, z, 0.4)) continue;
+      const lamp = streetLamp(1.25);
+      const side = k % 2 ? 1 : -1;
+      lamp.position.set(x + side * (SW / 2 + 0.12), 0.07, z);
+      lamp.rotation.y = side > 0 ? -Math.PI / 2 : Math.PI / 2;
+      g.add(part(lamp));
     }
   }
 
@@ -1333,7 +1561,7 @@ export function manhattanGrid(isIn, { avenues, AW, streets, SW, main }) {
 export function skyscraper(r, kind) {
   const g = new THREE.Group();
   const tower = (w, h, d, y, color, opts = {}) => {
-    const m = mesh(box(w, h, d), toon(color, { tile: 0.18, win: 0.18, ...opts }));
+    const m = mesh(box(w, h, d), toon(color, { win: 0.2, ...opts }));
     m.position.y = y + h / 2;
     g.add(m);
     return y + h;
@@ -1351,7 +1579,7 @@ export function skyscraper(r, kind) {
     g.add(crown, spire);
   } else if (kind === 'glass') {   // slim blue glass with a slanted top
     const h = r.f(8.5, 10.5);
-    const m = mesh(box(1.25, h, 1.25), toon('#7fb0e8', { colorB: '#1f47ae', grad: [-h / 2, h / 2], tile: 0.16, win: 0.16 }));
+    const m = mesh(box(1.25, h, 1.25), toon('#7fb0e8', { colorB: '#1f47ae', grad: [-h / 2, h / 2], win: 0.18 }));
     m.position.y = h / 2;
     g.add(m);
     const shp = new THREE.Shape();
@@ -1399,6 +1627,7 @@ export function taxi() {
     wheel.position.set(0, 0.04, z);
     g.add(wheel);
   }
+  carLights(g, { front: 0.23, back: -0.23, y: 0.1, x: 0.065, size: 0.7 });
   return g;
 }
 
@@ -1461,7 +1690,923 @@ export function suspensionBridge(r, len) {
   const rgt = mesh(box(t * 1.4, H, t), fc); rgt.position.set(0, H / 2, W / 2 + t / 2);
   frame.add(top, bot, lft, rgt);
   const win = addWindow(frame, { y: H / 2, ry: -Math.PI / 2, w: W, h: H, shape: SHAPE.CROSS, seed: 0.42, doubleSided: true, depth: 3, curtain: 0.3, light: LIGHTS.warm });
+  win.material = otherWorldMaterial();     // not a room: a way through to somewhere else
+  const glow = steadyGlow(3.4, '#ffb0d8', 0.3);
+  glow.position.set(-0.4, H / 2, 0);
+  frame.add(glow);
   frame.position.set(len + 0.05, deckY + 0.06, 0);
   g.add(frame);
   return { group: g, window: win };
+}
+
+// ------------------------------------------------------------- song scenes
+// Pieces added for specific songs: car lights, the little bus, the bus that
+// pulls into the stop, restless luggage, the window into another world,
+// fire-escape string lights, two interior rooms and the round-island road.
+
+// Head + tail lights on a vehicle whose front faces +z. The glows come on with
+// the night on its side of the world (they are LAMP_HALOS).
+function carLights(g, { front, back, y, x, size = 1 }) {
+  for (const s of [-1, 1]) {
+    const hl = mesh(box(0.05 * size, 0.035 * size, 0.012), basic('#fff6d0'), { edges: false });
+    hl.position.set(s * x, y, front + 0.006);
+    const hh = lampHalo(0.5 * size, '#fff1c4');
+    hh.position.set(s * x, y, front + 0.07 * size);
+    const tl = mesh(box(0.045 * size, 0.03 * size, 0.012), basic('#ff3b2f'), { edges: false });
+    tl.position.set(s * x, y, back - 0.006);
+    const th = lampHalo(0.28 * size, '#ff5040');
+    th.position.set(s * x, y, back - 0.05 * size);
+    g.add(hl, hh, tl, th);
+  }
+}
+
+// A small round-nosed bus, 1 unit long, front facing +z.
+export function miniBus(color = '#2f9a8f') {
+  const g = new THREE.Group();
+  const L = 1.0, W = 0.42, H = 0.46, y0 = 0.07;
+  const body = mesh(box(W, H, L), toon(color));
+  body.position.y = y0 + H / 2;
+  const roof = mesh(box(W + 0.01, 0.05, L * 0.94), toon(C.paper));
+  roof.position.y = y0 + H + 0.02;
+  const glass = mesh(box(W + 0.012, 0.14, L * 0.8), toon(C.glassOff, { win: 1 }), { edges: false });
+  glass.position.set(0, y0 + H * 0.68, -0.03);
+  const shield = mesh(box(W * 0.84, 0.17, 0.012), toon(C.glassOff, { win: 1 }), { edges: false });
+  shield.position.set(0, y0 + H * 0.66, L / 2 + 0.004);
+  const stripe = mesh(box(W + 0.012, 0.04, L + 0.004), toon(C.yellow), { edges: false });
+  stripe.position.y = y0 + H * 0.3;
+  const sign = mesh(box(W * 0.6, 0.05, 0.012), basic('#ffd34d'), { edges: false });
+  sign.position.set(0, y0 + H - 0.04, L / 2 + 0.006);
+  g.add(body, roof, glass, shield, stripe, sign);
+  for (const z of [-0.3, 0.3]) {
+    const wheel = mesh(box(W + 0.04, 0.12, 0.16), toon(C.ink), { edges: false });
+    wheel.position.set(0, 0.06, z);
+    g.add(wheel);
+  }
+  carLights(g, { front: L / 2, back: -L / 2, y: y0 + 0.1, x: W * 0.34, size: 1.4 });
+  return g;
+}
+
+// The bus stop's road, its bus, and three arrival lights on the yellow board.
+function busStopTraffic(g, W) {
+  const road = mesh(box(5.6, 0.03, 0.66), toon(C.asphalt), { edges: false });
+  road.position.set(0, 0.015, 1.08);
+  g.add(road);
+  for (let i = 0; i < 7; i++) {
+    const dash = mesh(box(0.34, 0.008, 0.04), basic('#f3e6b0'), { edges: false });
+    dash.position.set(-2.4 + i * 0.8, 0.034, 1.08);
+    g.add(dash);
+  }
+  const bus = miniBus();
+  bus.scale.setScalar(1.8);
+  bus.rotation.y = Math.PI / 2;           // drives along +x
+  bus.position.set(-3, 0.03, 1.08);
+  g.add(bus);
+  const on = new THREE.Color('#ff5a2a'), off = new THREE.Color('#7a5a20');
+  const dots = [-0.08, 0, 0.08].map(dx => {
+    const d = new THREE.Mesh(new THREE.CircleGeometry(0.03, 10), new THREE.MeshBasicMaterial({ color: off }));
+    d.position.set(-W / 2 - 0.45 + dx, 1.4, 0.172);
+    g.add(d);
+    return d;
+  });
+  return { bus, dots, on, off };
+}
+
+const smooth = (x) => { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); };
+
+// Two buses per loop: one pulls in, waits, leaves. The board's three lights
+// count it in, blink while it waits, go dark when it leaves.
+export function animateBusStop(a, ph) {
+  const u = (ph * 2) % 1;
+  let x, lit = 0, blink = false;
+  if (u < 0.22) { const e = u / 0.22; x = -3 + 3.2 * (1 - (1 - e) * (1 - e)); lit = 1 + Math.floor(e * 2.99); }
+  else if (u < 0.55) { x = 0.2; blink = true; }
+  else if (u < 0.75) { const e = (u - 0.55) / 0.2; x = 0.2 + 2.8 * e * e; }
+  else { x = -3; lit = (u - 0.75) / 0.25 > 0.5 ? 1 : 0; }
+  a.bus.position.x = x;
+  const s = smooth((3 - Math.abs(x)) / 0.7);
+  a.bus.scale.setScalar(1.8 * Math.max(0.0001, s));
+  a.bus.visible = s > 0.01;
+  // a little dip as it brakes and pulls away
+  const dip = u > 0.2 && u < 0.26 ? Math.sin((u - 0.2) / 0.06 * Math.PI) : 0;
+  a.bus.rotation.z = dip * 0.04;
+  const on = blink ? (Math.sin(TAU * ph * 24) > 0 ? 3 : 0) : lit;
+  a.dots.forEach((d, i) => d.material.color.copy(i < on ? a.on : a.off));
+}
+
+// Luggage that won't sit still: some bags jostle, a couple lift off the pile
+// and float, turning once, before settling back.
+export function animateLuggage(list, ph) {
+  for (const it of list) {
+    const b = it.b;
+    if (it.mode === 'jostle') {
+      const s = Math.max(0, Math.sin(TAU * (ph * it.k + it.off)));
+      const hop = Math.pow(s, 10);
+      b.position.set(0, hop * 0.14, 0);
+      b.rotation.set(it.rot.x, it.rot.y, it.rot.z + hop * 0.5 * it.sign);
+    } else if (it.mode === 'float') {
+      const u = (ph * 2 + it.off) % 1;
+      const up = smooth((u - 0.05) / 0.3) * (1 - smooth((u - 0.6) / 0.3));
+      b.position.set(Math.sin(TAU * u) * 0.25 * up, up * (1.4 + Math.sin(TAU * u * 3) * 0.08), 0);
+      b.rotation.set(it.rot.x * (1 - up), it.rot.y + TAU * smooth((u - 0.05) / 0.85), it.rot.z * (1 - up) + Math.sin(TAU * u * 2) * 0.2 * up);
+    }
+  }
+}
+
+// The bridge's window, opening onto another world: a slow spiral of the
+// portal colors pulling toward a bright middle, with sparks drifting out.
+export function otherWorldMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: { uTime: shared.uTime, uLoop: shared.uLoop },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */`
+      uniform float uTime, uLoop;
+      varying vec2 vUv;
+      const float TAU = 6.28318530718;
+      float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      vec3 pal(float x) {
+        vec3 c0 = vec3(0.0, 0.42, 0.95), c1 = vec3(0.86, 0.58, 1.0), c2 = vec3(0.98, 0.58, 0.74), c3 = vec3(1.0, 0.56, 0.3), c4 = vec3(1.0, 0.86, 0.35);
+        vec3 c = mix(c0, c1, smoothstep(0.0, 0.3, x));
+        c = mix(c, c2, smoothstep(0.25, 0.55, x));
+        c = mix(c, c3, smoothstep(0.5, 0.8, x));
+        return mix(c, c4, smoothstep(0.78, 1.0, x));
+      }
+      void main() {
+        vec2 p = (vUv - 0.5) * vec2(1.5 / 2.1, 1.0) * 2.0;
+        float r = length(p), ang = atan(p.y, p.x);
+        float ph = uTime / uLoop;
+        // soft rings drifting slowly inward, with only a slight wobble
+        float g = log(r + 0.08) * 0.55 + 0.035 * sin(ang * 2.0 + TAU * ph * 2.0) - ph * 6.0;
+        float x = 1.0 - abs(fract(g) * 2.0 - 1.0);
+        x = smoothstep(0.0, 1.0, x);
+        vec3 col = mix(pal(x), vec3(0.98, 0.9, 0.95), 0.18);
+        col = mix(col, vec3(1.0, 0.97, 0.92), smoothstep(0.38, 0.0, r));   // light at the far end
+        col *= mix(1.0, 0.7, smoothstep(0.7, 1.4, r));
+        vec2 q = vec2(ang / TAU * 12.0, log(r + 0.04) * 4.0 - ph * 12.0);
+        vec2 f = fract(q) - 0.5;
+        float star = step(0.88, hash(floor(q))) * smoothstep(0.14, 0.0, length(f));
+        col += star * 0.5;
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+    side: THREE.DoubleSide,
+  });
+}
+
+// A soft glow that never switches off (unlike lamp halos)
+export function steadyGlow(size, color, opacity = 0.6) {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: haloTex(), color, transparent: true, opacity, depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  s.scale.setScalar(size);
+  s.renderOrder = 6;
+  return s;
+}
+
+// String lights: round bulbs that twinkle in five colors, brighter and
+// haloed at night (New York's night).
+let stringMat = null;
+export function stringLights(points) {
+  if (!stringMat) {
+    stringMat = new THREE.ShaderMaterial({
+      uniforms: { uTime: shared.uTime, uLoop: shared.uLoop, uNight: shared.uNightA, uPxH: shared.uPxH },
+      vertexShader: /* glsl */`
+        uniform float uTime, uLoop, uNight, uPxH;
+        attribute float aSeed;
+        varying vec3 vCol;
+        varying float vB;
+        const float TAU = 6.28318530718;
+        void main() {
+          float k = floor(6.0 + aSeed * 7.0);
+          float tw = 0.5 + 0.5 * sin(TAU * (uTime / uLoop * k + aSeed * 5.0));
+          vB = mix(0.8, 1.1, uNight) * (0.55 + 0.45 * tw);
+          float c = floor(fract(aSeed * 13.0) * 5.0);
+          vCol = c < 0.5 ? vec3(1.0, 0.86, 0.55) : c < 1.5 ? vec3(1.0, 0.3, 0.25) : c < 2.5 ? vec3(0.35, 0.9, 0.45) : c < 3.5 ? vec3(0.4, 0.6, 1.0) : vec3(1.0, 0.85, 0.2);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          gl_PointSize = max(3.0, 0.06 * (1.6 + 1.4 * uNight) * projectionMatrix[1][1] * uPxH * 0.5);
+        }`,
+      fragmentShader: /* glsl */`
+        uniform float uNight;
+        varying vec3 vCol;
+        varying float vB;
+        void main() {
+          float d = length(gl_PointCoord - 0.5);
+          float core = smoothstep(0.5 / (1.6 + 1.4 * uNight), 0.0, d);
+          float halo = smoothstep(0.5, 0.0, d) * (0.15 + 0.2 * uNight);
+          float a = max(core, halo) * vB;
+          if (a < 0.02) discard;
+          gl_FragColor = vec4(mix(vCol, vec3(1.0), core * 0.4) * (0.6 + vB), a);
+        }`,
+      transparent: true, depthWrite: false,
+    });
+  }
+  const pos = [], seed = [];
+  points.forEach((p, i) => { pos.push(p.x, p.y, p.z); seed.push(fract1(i * 0.6180339 + p.x * 3.1)); });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('aSeed', new THREE.Float32BufferAttribute(seed, 1));
+  const pts = new THREE.Points(geo, stringMat);
+  pts.frustumCulled = false;
+  return pts;
+}
+const fract1 = (x) => x - Math.floor(x);
+
+// ---- interiors. Each is a room with its open side facing +z (where the
+// camera sits) and a big window in the wall at z = 0 looking out along -z.
+// `eye` sits in the middle of the window; the camera presets aim at it.
+
+function roomShell(g, { RW, RH, RD, winW, winH, sill, wall, floor, ceil, tile = 0 }) {
+  const T = 0.22;
+  const wm = toon(wall, { tile });
+  const add = (w, h, d, x, y, z, m = wm) => { const o = mesh(box(w, h, d), m); o.position.set(x, y, z); g.add(o); return o; };
+  const side = (RW - winW) / 2;
+  add(side, RH, T, -RW / 2 + side / 2, RH / 2, -T / 2);
+  add(side, RH, T, RW / 2 - side / 2, RH / 2, -T / 2);
+  add(winW, sill, T, 0, sill / 2, -T / 2);
+  add(winW, RH - sill - winH, T, 0, sill + winH + (RH - sill - winH) / 2, -T / 2);
+  add(T, RH, RD, -RW / 2 - T / 2, RH / 2, RD / 2);
+  add(T, RH, RD, RW / 2 + T / 2, RH / 2, RD / 2);
+  add(RW + T * 2, T, RD + T, 0, -T / 2, RD / 2 - T / 2, toon(floor));
+  add(RW + T * 2, T, RD + T, 0, RH + T / 2, RD / 2 - T / 2, toon(ceil));
+  // window frame, a cross of mullions, a deep sill
+  const fm = toon(C.paper);
+  const ft = 0.1;
+  add(winW + ft * 2, ft, 0.3, 0, sill - ft / 2 + 0.02, 0.0, fm);
+  add(winW + ft * 2, ft, 0.3, 0, sill + winH + ft / 2 - 0.02, 0.0, fm);
+  add(ft, winH, 0.3, -winW / 2 - ft / 2 + 0.02, sill + winH / 2, 0.0, fm);
+  add(ft, winH, 0.3, winW / 2 + ft / 2 - 0.02, sill + winH / 2, 0.0, fm);
+  add(0.06, winH, 0.12, 0, sill + winH / 2, 0.0, fm);
+  add(winW, 0.06, 0.12, 0, sill + winH * 0.72, 0.0, fm);
+  const ledge = add(winW + 0.4, 0.08, 0.5, 0, sill + 0.04, 0.2, fm);
+  const eye = new THREE.Object3D();
+  eye.position.set(0, sill + winH / 2, 0);
+  g.add(eye);
+  return { eye, ledge };
+}
+
+function pottedPlant(r, s = 1) {
+  const g = new THREE.Group();
+  const pot = mesh(new THREE.CylinderGeometry(0.16 * s, 0.12 * s, 0.24 * s, 8), toon(C.terracotta));
+  pot.position.y = 0.12 * s;
+  const leaves = mesh(faceted(new THREE.IcosahedronGeometry(0.26 * s, 0)), toon(r.pick(['#58ab29', '#6fb34d', '#3f8f3a'])));
+  leaves.position.y = 0.42 * s;
+  leaves.scale.y = 1.3;
+  g.add(pot, leaves);
+  return g;
+}
+
+function hangingLamp(g, x, y, z, len = 0.9) {
+  const cord = mesh(box(0.02, len, 0.02), toon(C.ink), { edges: false });
+  cord.position.set(x, y - len / 2, z);
+  const shade = mesh(new THREE.ConeGeometry(0.28, 0.24, 10, 1, true), toon(C.softYellow, { doubleSided: true }));
+  shade.position.set(x, y - len - 0.08, z);
+  const bulb = mesh(new THREE.SphereGeometry(0.07, 8, 6), basic('#fff1c4'), { edges: false });
+  bulb.position.set(x, y - len - 0.2, z);
+  const glow = lampHalo(2.6);
+  glow.position.copy(bulb.position);
+  g.add(cord, shade, bulb, glow);
+}
+
+// 不想去遠方: a bedroom-ish room in Taiwan, its window open on the mountains
+// and the neighbors' roofs. Curtains breathe, an electric fan turns its head.
+export function lookoutRoom(r) {
+  const g = new THREE.Group();
+  const RW = 8.4, RH = 5.4, RD = 4.6, winW = 6, winH = 3.6, sill = 0.95;
+  const { eye } = roomShell(g, { RW, RH, RD, winW, winH, sill, wall: '#efe6cf', floor: '#d9b38c', ceil: '#f7f1e6' });
+  // curtains, hinged at the rail so they can sway
+  const curtains = [];
+  for (const s of [-1, 1]) {
+    const pivot = new THREE.Group();
+    pivot.position.set(s * (winW / 2 + 0.15), sill + winH + 0.25, 0.35);
+    const c = mesh(box(0.7, winH + 0.6, 0.06), toon('#f6a9b4', { rib: 0.12 }));
+    c.position.y = -(winH + 0.6) / 2;
+    pivot.add(c);
+    g.add(pivot);
+    curtains.push({ pivot, s });
+  }
+  const rail = mesh(box(winW + 1.4, 0.05, 0.05), toon(C.ink), { edges: false });
+  rail.position.set(0, sill + winH + 0.27, 0.35);
+  g.add(rail);
+  // sill things
+  const p1 = pottedPlant(r, 1.1); p1.position.set(-2.1, sill + 0.08, 0.2);
+  const p2 = pottedPlant(r, 0.8); p2.position.set(2.3, sill + 0.08, 0.25);
+  const cup = mesh(new THREE.CylinderGeometry(0.09, 0.08, 0.17, 10), toon(C.paper));
+  cup.position.set(1.7, sill + 0.17, 0.25);
+  g.add(p1, p2, cup);
+  // an electric fan on a stool, front right
+  const fan = new THREE.Group();
+  const stand = mesh(box(0.06, 1.1, 0.06), toon(C.paper), { edges: false });
+  stand.position.y = 0.55;
+  const base = mesh(new THREE.CylinderGeometry(0.3, 0.34, 0.06, 12), toon(C.paper));
+  base.position.y = 0.03;
+  const head = new THREE.Group();
+  head.position.y = 1.15;
+  const motor = mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.2, 10), toon('#8fd1c4'));
+  motor.rotation.x = Math.PI / 2;
+  const cage = mesh(new THREE.TorusGeometry(0.42, 0.02, 4, 24), toon('#8fd1c4'), { edges: false });
+  cage.position.z = -0.14;
+  const blades = new THREE.Group();
+  blades.position.z = -0.14;
+  for (let i = 0; i < 3; i++) {
+    const b = mesh(new THREE.CircleGeometry(0.17, 8), toon('#bfe6dd', { doubleSided: true }), { edges: false });
+    b.scale.set(1, 0.55, 1);
+    b.position.set(Math.cos(i * TAU / 3) * 0.2, Math.sin(i * TAU / 3) * 0.2, 0);
+    b.rotation.z = i * TAU / 3;
+    blades.add(b);
+  }
+  head.add(motor, cage, blades);
+  fan.add(base, stand, head);
+  fan.position.set(3.2, 0, 1.6);
+  g.add(fan);
+  // a low bed edge along the left, a stack of books
+  const bed = mesh(box(2.4, 0.55, 2.2), toon('#cfe0f2'));
+  bed.position.set(-2.9, 0.28, 2.6);
+  const pillow = mesh(box(0.8, 0.18, 0.5), toon(C.paper));
+  pillow.position.set(-3.5, 0.64, 1.9);
+  g.add(bed, pillow);
+  hangingLamp(g, -2.6, RH, 2.6, 0.9);
+  return { group: g, eye, curtains, fanHead: head, blades };
+}
+
+// 浴室: a pink-tiled bathroom inside a floating house; the window looks out
+// at New York's towers. A duck floats in the tub.
+export function bathroomRoom(r) {
+  const g = new THREE.Group();
+  const RW = 6.2, RH = 4.4, RD = 3.6, winW = 3.0, winH = 2.4, sill = 1.25;
+  const { eye } = roomShell(g, { RW, RH, RD, winW, winH, sill, wall: '#f6c1c9', floor: '#f7f1e6', ceil: '#fbe3e6', tile: 0.12 });
+  // checker floor
+  for (let i = 0; i < 12; i++) for (let k = 0; k < 7; k++) {
+    if ((i + k) % 2) continue;
+    const t = mesh(box(0.5, 0.01, 0.5), toon('#f3a5b2'), { edges: false });
+    t.position.set(-RW / 2 + 0.25 + i * 0.5 + 0.01, 0.006, 0.25 + k * 0.5);
+    g.add(t);
+  }
+  // tub along the window wall, left
+  const tub = mesh(box(2.4, 0.75, 1.1), toon(C.paper));
+  tub.position.set(-1.7, 0.375, 0.75);
+  const water = mesh(box(2.2, 0.02, 0.9), toon('#9fd3ea'), { edges: false });
+  water.position.set(-1.7, 0.7, 0.75);
+  const faucet = mesh(box(0.08, 0.3, 0.08), toon('#c9d3e0'), { edges: false });
+  faucet.position.set(-2.75, 0.9, 0.35);
+  g.add(tub, water, faucet);
+  const duck = new THREE.Group();
+  const db = mesh(new THREE.SphereGeometry(0.13, 8, 6), toon(C.yellow));
+  db.scale.set(1.3, 0.8, 1);
+  const dh = mesh(new THREE.SphereGeometry(0.08, 8, 6), toon(C.yellow));
+  dh.position.set(0.1, 0.11, 0);
+  const beak = mesh(box(0.06, 0.03, 0.04), toon('#ff7b2a'), { edges: false });
+  beak.position.set(0.19, 0.1, 0);
+  duck.add(db, dh, beak);
+  duck.position.set(-1.6, 0.76, 0.85);
+  g.add(duck);
+  // sink + round mirror, right
+  const sink = mesh(box(0.9, 0.18, 0.55), toon(C.paper));
+  sink.position.set(2.1, 1.0, 0.4);
+  const ped = mesh(box(0.22, 0.95, 0.22), toon(C.paper));
+  ped.position.set(2.1, 0.48, 0.35);
+  const mirror = new THREE.Mesh(new THREE.CircleGeometry(0.42, 24), basic('#cfe7f5'));
+  mirror.position.set(2.1, 1.85, 0.012);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.47, 24), basic(C.ink));
+  ring.position.set(2.1, 1.85, 0.014);
+  const brushCup = mesh(new THREE.CylinderGeometry(0.06, 0.05, 0.14, 8), toon('#8fd1c4'));
+  brushCup.position.set(2.35, 1.16, 0.3);
+  g.add(sink, ped, mirror, ring, brushCup);
+  // towel on a rail by the window
+  const tRail = mesh(box(0.7, 0.03, 0.03), toon(C.ink), { edges: false });
+  tRail.position.set(0.0, sill - 0.25, 0.08);
+  const towel = mesh(box(0.55, 0.7, 0.04), toon('#ffffff', { rib: 0.1 }));
+  towel.position.set(0.0, sill - 0.6, 0.1);
+  g.add(tRail, towel);
+  const plant = pottedPlant(r, 0.7); plant.position.set(1.1, sill + 0.08, 0.2);
+  g.add(plant);
+  hangingLamp(g, -1.7, RH, 1.6, 0.5);
+  return { group: g, eye, duck };
+}
+
+// 晚安台灣: a road just inside the island's edge, all the way round, with
+// street lamps on its outer side. path(t, out, ahead) gives a point (and a
+// point a little further on) for t in 0..1.
+export function ringRoad(radial, { inset = 0.42, width = 0.36, n = 180, lamps = 10 } = {}) {
+  const g = new THREE.Group();
+  const P = (t, out) => {
+    const th = t * TAU;
+    const rr = radial(th) - inset;
+    return out.set(Math.cos(th) * rr, 0.014, Math.sin(th) * rr);
+  };
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), nrm = new THREE.Vector3();
+  const pos = [], idx = [];
+  for (let i = 0; i <= n; i++) {
+    P(i / n, a); P((i + 1) / n, b);
+    nrm.set(b.z - a.z, 0, -(b.x - a.x)).normalize();
+    pos.push(a.x + nrm.x * width / 2, a.y, a.z + nrm.z * width / 2, a.x - nrm.x * width / 2, a.y, a.z - nrm.z * width / 2);
+    if (i < n) { const k = i * 2; idx.push(k, k + 2, k + 1, k + 1, k + 2, k + 3); }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  const road = new THREE.Mesh(geo, toon(C.asphalt, { doubleSided: true }));
+  g.add(road);
+  const dash = [];
+  for (let i = 0; i < n; i += 2) { P(i / n, a); P((i + 0.9) / n, b); a.y = b.y = 0.02; dash.push(a.clone(), b.clone()); }
+  g.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(dash), new THREE.LineBasicMaterial({ color: '#f3e6b0' })));
+  for (let i = 0; i < lamps; i++) {
+    const t = (i + 0.5) / lamps;
+    P(t, a); P(t + 0.002, b);
+    nrm.set(b.z - a.z, 0, -(b.x - a.x)).normalize();   // points outward
+    const l = streetLamp(1.3);
+    l.position.set(a.x + nrm.x * (width / 2 + 0.12), 0, a.z + nrm.z * (width / 2 + 0.12));
+    l.rotation.y = Math.atan2(-nrm.x, -nrm.z);          // arm leans over the road
+    g.add(l);
+  }
+  return { group: g, path: P };
+}
+
+// ------------------------------------------------------------- round 8
+// A big apple floating by New York, a windmill island, and an airport
+// departures board drifting through the sky.
+
+// The Big Apple: a low-poly apple with a dimpled top, a stem and one leaf.
+export function bigApple() {
+  const g = new THREE.Group();
+  const geo = new THREE.IcosahedronGeometry(1, 2);
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    let x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const rho2 = x * x + z * z;
+    y *= 0.9;
+    if (y > 0) y -= 0.3 * Math.exp(-rho2 / 0.12);       // the dimple at the stem
+    else y += 0.16 * Math.exp(-rho2 / 0.1);             // and underneath
+    const wide = 1 + 0.08 * y;                          // a little wider at the shoulders
+    p.setXYZ(i, x * wide, y, z * wide);
+  }
+  const body = mesh(faceted(geo), toon('#f0402f', { colorB: '#b81d2a', grad: [-0.8, 0.7] }));
+  const stem = mesh(box(0.07, 0.42, 0.07), toon(C.wood), { edges: false });
+  stem.position.set(0.02, 0.74, 0);
+  stem.rotation.z = -0.18;
+  const leaf = mesh(faceted(new THREE.IcosahedronGeometry(0.2, 0)), toon('#58ab29'));
+  leaf.scale.set(1.8, 0.25, 0.8);
+  leaf.position.set(0.24, 0.84, 0.02);
+  leaf.rotation.z = 0.45;
+  g.add(body, stem, leaf);
+  return g;
+}
+
+// A wind turbine (the power-making kind): a tall slim white tower, a
+// nacelle, three long thin blades, a small substation box at its foot.
+export function windmill() {
+  const g = new THREE.Group();
+  const white = toon('#f4f2ec');
+  const tower = mesh(new THREE.CylinderGeometry(0.09, 0.2, 5.2, 10), white);
+  tower.position.y = 2.6;
+  const nacelle = mesh(box(0.3, 0.28, 0.75), white);
+  nacelle.position.set(0, 5.3, -0.05);
+  const hub = mesh(new THREE.ConeGeometry(0.15, 0.3, 10), white);
+  hub.rotation.x = Math.PI / 2;
+  hub.position.set(0, 5.3, 0.45);
+  const sails = new THREE.Group();
+  sails.position.set(0, 5.3, 0.4);
+  for (let i = 0; i < 3; i++) {
+    const arm = new THREE.Group();
+    arm.rotation.z = i * TAU / 3;
+    // a long blade, wide near the root and tapering to a point
+    const shp = new THREE.Shape();
+    shp.moveTo(-0.07, 0.1); shp.lineTo(0.12, 0.35); shp.lineTo(0.03, 2.6); shp.lineTo(-0.03, 2.6); shp.closePath();
+    const geo = new THREE.ExtrudeGeometry(shp, { depth: 0.03, bevelEnabled: false });
+    const blade = mesh(geo, white);
+    const tip = mesh(box(0.06, 0.35, 0.035), toon(C.roofRed), { edges: false });   // red warning tip
+    tip.position.set(0, 2.42, 0.015);
+    arm.add(blade, tip);
+    sails.add(arm);
+  }
+  const station = mesh(box(0.6, 0.4, 0.45), toon('#cfd8e2'));
+  station.position.set(0.8, 0.2, 0.3);
+  const bolt = mesh(box(0.05, 0.16, 0.01), basic(C.yellow), { edges: false });
+  bolt.position.set(0.8, 0.22, 0.53);
+  bolt.rotation.z = 0.5;
+  const doorT = mesh(box(0.14, 0.3, 0.02), toon(C.roofBlue), { edges: false });
+  doorT.position.set(0, 0.15, 0.19);
+  g.add(tower, nacelle, hub, sails, station, bolt, doorT);
+  // a beacon on top that blinks red at night
+  const beacon = lampHalo(0.6, '#ff4030');
+  beacon.position.set(0, 5.5, -0.05);
+  g.add(beacon);
+  return { group: g, sails };
+}
+
+// Departure board screen: rows of split-flap characters (made-up glyphs,
+// nothing to read), a yellow header, a status light per row. Each row
+// riffles to a new line now and then; everything repeats with the loop.
+function departuresMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: { uTime: shared.uTime, uLoop: shared.uLoop, uNight: shared.uNightB },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */`
+      uniform float uTime, uLoop, uNight;
+      varying vec2 vUv;
+      float hash(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+      void main() {
+        vec2 uv = vUv;
+        float ph = uTime / uLoop;
+        vec3 bg = vec3(0.07, 0.1, 0.24);
+        vec3 col = bg;
+        // header
+        if (uv.y > 0.84) {
+          col = vec3(0.95, 0.84, 0.0);
+          // a little plane mark and two word-blocks
+          vec2 h = (uv - vec2(0.07, 0.92)) * vec2(7.0 / 4.2, 1.0);
+          float plane = step(abs(h.y), 0.012) * step(abs(h.x), 0.045) + step(abs(h.x + 0.005), 0.012) * step(abs(h.y), 0.045);
+          float words = step(0.13, uv.x) * step(uv.x, 0.48) * step(abs(uv.y - 0.92), 0.025)
+                      + step(0.52, uv.x) * step(uv.x, 0.66) * step(abs(uv.y - 0.92), 0.025);
+          col = mix(col, vec3(0.07, 0.1, 0.24), clamp(plane + words, 0.0, 1.0));
+          gl_FragColor = vec4(col, 1.0);
+          return;
+        }
+        // six rows
+        float rows = 6.0;
+        float ry = uv.y / 0.84 * rows;
+        float row = floor(ry);
+        float fy = fract(ry);
+        float cols = 26.0;
+        float cx = uv.x * cols;
+        float c = floor(cx);
+        float fx = fract(cx);
+        // columns: time 0-3, gap, place 5-13, gap, flight 15-19, gap, gate 21-22, gap, status 24-25
+        bool isChar = (c <= 3.0) || (c >= 5.0 && c <= 13.0) || (c >= 15.0 && c <= 19.0) || (c >= 21.0 && c <= 22.0);
+        float k = 2.0 + floor(hash(vec3(row, 1.0, 2.0)) * 4.0);       // flips per loop
+        float off = hash(vec3(row, 3.0, 4.0));
+        float q = ph * k + off;
+        float line = mod(floor(q), k);
+        float t = fract(q);
+        if (isChar) {
+          // a dark tile with the flap seam across the middle
+          vec2 cc = vec2(fx, fy);
+          float tile = step(0.08, cc.x) * step(cc.x, 0.92) * step(0.12, cc.y) * step(cc.y, 0.88);
+          col = mix(bg, vec3(0.13, 0.17, 0.33), tile);
+          // riffling: each character spins through a few faces, left to right
+          float r = clamp((t - c * 0.0025) / 0.035, 0.0, 1.0);
+          float face = line * 7.0 + (r < 1.0 && r > 0.0 ? floor(r * 6.0) + 50.0 : 0.0);
+          // 3 x 5 dot glyph
+          vec2 g = (cc - vec2(0.22, 0.2)) / vec2(0.56, 0.6);
+          if (g.x > 0.0 && g.x < 1.0 && g.y > 0.0 && g.y < 1.0) {
+            vec2 cell = floor(g * vec2(3.0, 5.0));
+            float bit = step(0.48, hash(vec3(cell + vec2(c * 3.1, row * 5.7), face)));
+            vec2 fp = fract(g * vec2(3.0, 5.0)) - 0.5;
+            float dotm = step(max(abs(fp.x), abs(fp.y)), 0.38);
+            vec3 amber = c <= 3.0 ? vec3(1.0, 0.86, 0.3) : vec3(1.0, 0.72, 0.25);
+            col = mix(col, amber * (0.85 + 0.3 * uNight), bit * dotm * tile);
+          }
+          col = mix(col, bg, step(abs(cc.y - 0.5), 0.02) * tile);   // the seam
+        } else if (c >= 24.0 && c <= 25.0) {
+          float st = hash(vec3(row, line, 9.0));
+          vec3 lamp = st < 0.6 ? vec3(0.3, 0.9, 0.45) : st < 0.85 ? vec3(1.0, 0.8, 0.2) : vec3(1.0, 0.3, 0.25);
+          vec2 d = vec2((cx - 25.0) / cols * 7.0, (fy - 0.5) / rows * 0.84 * 4.2);
+          float blink = st > 0.85 ? step(0.5, fract(ph * 60.0)) : 1.0;
+          col = mix(col, lamp, step(length(d), 0.11) * mix(0.35, 1.0, blink));
+        }
+        // faint row rules
+        col = mix(col, vec3(0.2, 0.26, 0.48), step(fy, 0.02) * 0.6);
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+  });
+}
+
+export function departuresBoard() {
+  const g = new THREE.Group();
+  const W = 7, H = 4.2;
+  const back = mesh(box(W + 0.3, H + 0.3, 0.26), toon(C.ink));
+  g.add(back);
+  const mat = departuresMaterial();
+  for (const s of [1, -1]) {
+    const screen = new THREE.Mesh(new THREE.PlaneGeometry(W, H), mat);
+    screen.position.z = s * 0.135;
+    if (s < 0) screen.rotation.y = Math.PI;
+    g.add(screen);
+  }
+  // two little hanging rods, as if it was unhooked from a terminal ceiling
+  for (const x of [-W * 0.3, W * 0.3]) {
+    const rod = mesh(box(0.06, 1.2, 0.06), toon(C.ink), { edges: false });
+    rod.position.set(x, H / 2 + 0.75, 0);
+    g.add(rod);
+  }
+  return g;
+}
+
+// ------------------------------------------------------------- round 10
+// Neon fish, a big clock, fireflies, a dining room, laundry in the wind,
+// phones and radios.
+
+// A soft schooling fish (after the fish-tank project): a pastel teardrop body,
+// two small fins and a crescent tail that wags, seen side-on. Faces +z.
+const fishMats = new Map();
+const fishMat = (c, op = 1) => {
+  const k = c + op;
+  if (!fishMats.has(k)) fishMats.set(k, new THREE.MeshBasicMaterial({ color: c, side: THREE.DoubleSide, transparent: op < 1, opacity: op }));
+  return fishMats.get(k);
+};
+let fishBodyGeo = null, fishTailGeo = null, fishFinGeo = null;
+export function schoolFish(color) {
+  if (!fishBodyGeo) {
+    // drawn in (x = along the body, y = up), then turned so x runs along z
+    const b = new THREE.Shape();
+    b.moveTo(0.6, 0);
+    b.bezierCurveTo(0.35, 0.26, -0.08, 0.26, -0.5, 0.09);
+    b.bezierCurveTo(-0.55, 0.05, -0.55, -0.05, -0.5, -0.09);
+    b.bezierCurveTo(-0.08, -0.26, 0.35, -0.26, 0.6, 0);
+    fishBodyGeo = new THREE.ShapeGeometry(b, 10).rotateY(-Math.PI / 2);
+    const t = new THREE.Shape();
+    t.moveTo(0, 0);
+    t.bezierCurveTo(-0.12, 0.08, -0.25, 0.2, -0.32, 0.26);
+    t.bezierCurveTo(-0.24, 0.1, -0.24, -0.1, -0.32, -0.26);
+    t.bezierCurveTo(-0.25, -0.2, -0.12, -0.08, 0, 0);
+    fishTailGeo = new THREE.ShapeGeometry(t, 8).rotateY(-Math.PI / 2);
+    const f = new THREE.Shape();
+    f.moveTo(0, 0); f.quadraticCurveTo(-0.08, -0.14, -0.2, -0.16); f.quadraticCurveTo(-0.1, -0.04, 0, 0);
+    fishFinGeo = new THREE.ShapeGeometry(f, 4).rotateY(-Math.PI / 2);
+  }
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(fishBodyGeo, fishMat(color)));
+  const tail = new THREE.Group();
+  tail.position.z = -0.48;
+  tail.add(new THREE.Mesh(fishTailGeo, fishMat(color)));
+  const fin = new THREE.Mesh(fishFinGeo, fishMat(color, 0.55));
+  fin.position.set(0, -0.05, 0.12);
+  g.add(tail, fin);
+  return { group: g, tail };
+}
+
+// A big dreamy clock: a soft sky-gradient face that slowly breathes,
+// pastel dots for the hours, thin hands that spin fast.
+export function bigClock() {
+  const g = new THREE.Group();
+  const R = 2.6;
+  const body = new THREE.Group();          // squashes and stretches a little, like it's melting
+  g.add(body);
+  const rim = mesh(new THREE.CylinderGeometry(R + 0.18, R + 0.18, 0.3, 48), toon('#f6c1c9'));
+  rim.rotation.x = Math.PI / 2;
+  body.add(rim);
+  const faceMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: shared.uTime, uLoop: shared.uLoop },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */`
+      uniform float uTime, uLoop;
+      varying vec2 vUv;
+      const float TAU = 6.28318530718;
+      void main() {
+        vec2 p = vUv - 0.5;
+        float ph = uTime / uLoop;
+        // a soft sky inside the clock: blue at the top to peach below, a
+        // pale glow drifting round, faint rings flowing out from the middle
+        vec3 col = mix(vec3(0.98, 0.8, 0.72), vec3(0.62, 0.74, 0.98), smoothstep(-0.5, 0.5, p.y + 0.08 * sin(TAU * ph * 2.0 + p.x * 4.0)));
+        vec2 gp = 0.22 * vec2(cos(TAU * ph * 3.0), sin(TAU * ph * 3.0));
+        col = mix(col, vec3(1.0, 0.95, 0.97), exp(-dot(p - gp, p - gp) * 30.0) * 0.6);
+        col = mix(col, vec3(0.86, 0.72, 0.98), 0.12 * (0.5 + 0.5 * sin(length(p) * 40.0 - TAU * ph * 12.0)));
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+  });
+  const face = new THREE.Mesh(new THREE.CircleGeometry(R, 48), faceMat);
+  face.position.z = 0.16;
+  body.add(face);
+  const dotCols = ['#ffffff', '#f6a9b4', '#b69ae4', '#8fd1c4'];
+  for (let i = 0; i < 12; i++) {
+    const a = i / 12 * TAU;
+    const d = new THREE.Mesh(new THREE.CircleGeometry(i % 3 === 0 ? 0.16 : 0.09, 14), basic(dotCols[i % 4]));
+    d.position.set(Math.sin(a) * (R - 0.42), Math.cos(a) * (R - 0.42), 0.18);
+    body.add(d);
+  }
+  const hand = (len, w, color, z) => {
+    const p = new THREE.Group();
+    p.position.z = z;
+    const m = mesh(box(w, len, 0.03), toon(color), { edges: false });
+    m.position.y = len / 2 - 0.15;
+    p.add(m);
+    body.add(p);
+    return p;
+  };
+  const hour = hand(1.3, 0.12, '#24357f', 0.2);
+  const minute = hand(2.0, 0.07, '#24357f', 0.23);
+  const second = hand(2.2, 0.025, '#f2a7b8', 0.26);
+  const cap = new THREE.Mesh(new THREE.CircleGeometry(0.12, 16), basic('#f2a7b8'));
+  cap.position.z = 0.28;
+  body.add(cap);
+  return { group: g, body, hour, minute, second };
+}
+
+// Fireflies: warm points drifting round a spot, each flickering on and off.
+export function fireflies(n = 40, radius = 1.8) {
+  const pos = [], seed = [];
+  for (let i = 0; i < n; i++) {
+    const a = fract1(i * 0.618) * TAU, b = fract1(i * 0.377) * 2 - 1, rr = radius * (0.35 + 0.65 * fract1(i * 0.731));
+    pos.push(Math.cos(a) * rr * Math.sqrt(1 - b * b), b * rr * 0.8, Math.sin(a) * rr * Math.sqrt(1 - b * b));
+    seed.push(fract1(i * 0.4142 + 0.17));
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('aSeed', new THREE.Float32BufferAttribute(seed, 1));
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTime: shared.uTime, uLoop: shared.uLoop, uPxH: shared.uPxH },
+    vertexShader: /* glsl */`
+      uniform float uTime, uLoop, uPxH;
+      attribute float aSeed;
+      varying float vA;
+      const float TAU = 6.28318530718;
+      void main() {
+        float ph = uTime / uLoop;
+        float k1 = 2.0 + floor(aSeed * 3.0), k2 = 3.0 + floor(fract(aSeed * 7.0) * 3.0);
+        vec3 p = position + vec3(sin(TAU * (ph * k1 + aSeed)) * 0.35, sin(TAU * (ph * k2 + aSeed * 3.0)) * 0.25, cos(TAU * (ph * k1 + aSeed * 5.0)) * 0.35);
+        // flicker: mostly dim, then a soft pulse of light
+        float f = pow(max(0.0, sin(TAU * (ph * (8.0 + floor(aSeed * 9.0)) + aSeed * 11.0))), 3.0);
+        vA = 0.3 + 0.6 * f;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+        gl_PointSize = max(5.0, 0.28 * projectionMatrix[1][1] * uPxH * 0.5);
+      }`,
+    fragmentShader: /* glsl */`
+      varying float vA;
+      void main() {
+        float d = length(gl_PointCoord - 0.5);
+        float a = (smoothstep(0.5, 0.0, d) * 0.25 + smoothstep(0.16, 0.0, d) * 0.85) * vA;
+        if (a < 0.01) discard;
+        gl_FragColor = vec4(vec3(0.95, 0.97, 0.9) * a * 0.8, a);
+      }`,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  });
+  const pts = new THREE.Points(geo, mat);
+  pts.frustumCulled = false;
+  return pts;
+}
+
+// 一桌菜: a dining room in Taiwan with a round red table set for dinner; its
+// window looks out over the island. Steam rises from the dishes.
+export function diningRoom(r) {
+  const g = new THREE.Group();
+  const RW = 8.0, RH = 5.2, RD = 4.8, winW = 4.6, winH = 3.0, sill = 1.5;
+  const { eye } = roomShell(g, { RW, RH, RD, winW, winH, sill, wall: '#f3e2c4', floor: '#c98f62', ceil: '#f7f1e6' });
+  const T = new THREE.Group();
+  T.position.set(0, 0, 2.4);
+  const top = mesh(new THREE.CylinderGeometry(1.7, 1.7, 0.14, 40), toon('#d8322a'));
+  top.position.y = 1.0;
+  const lazy = mesh(new THREE.CylinderGeometry(0.85, 0.85, 0.06, 32), toon('#b52a24'));
+  lazy.position.y = 1.1;
+  const leg = mesh(new THREE.CylinderGeometry(0.16, 0.3, 0.95, 10), toon('#8f2a22'));
+  leg.position.y = 0.48;
+  T.add(top, lazy, leg);
+  // dishes on the turntable and rice bowls round the edge
+  const dishCols = ['#58ab29', '#f2a33a', '#f6a9b4', '#f3d600', '#c4583a'];
+  for (let i = 0; i < 5; i++) {
+    const a = i / 5 * TAU;
+    const plate = mesh(new THREE.CylinderGeometry(0.26, 0.2, 0.05, 16), toon(C.paper));
+    plate.position.set(Math.cos(a) * 0.5, 1.16, Math.sin(a) * 0.5);
+    const food = mesh(new THREE.SphereGeometry(0.17, 8, 4, 0, TAU, 0, Math.PI / 2), toon(dishCols[i]));
+    food.position.set(Math.cos(a) * 0.5, 1.18, Math.sin(a) * 0.5);
+    food.scale.y = 0.6;
+    T.add(plate, food);
+  }
+  const fish = mesh(new THREE.SphereGeometry(0.22, 8, 6), toon('#e8b26a'));
+  fish.scale.set(1.6, 0.4, 0.7);
+  fish.position.set(0, 1.2, 0);
+  T.add(fish);
+  for (let i = 0; i < 6; i++) {
+    const a = i / 6 * TAU + 0.3;
+    const bowl = mesh(new THREE.SphereGeometry(0.13, 10, 5, 0, TAU, Math.PI / 2, Math.PI / 2), toon('#f4f2ec', { doubleSided: true }));
+    bowl.position.set(Math.cos(a) * 1.35, 1.2, Math.sin(a) * 1.35);
+    const rice = mesh(new THREE.SphereGeometry(0.11, 8, 4, 0, TAU, 0, Math.PI / 2), toon('#ffffff'));
+    rice.position.set(Math.cos(a) * 1.35, 1.17, Math.sin(a) * 1.35);
+    const chop = mesh(box(0.02, 0.02, 0.4), toon(C.wood), { edges: false });
+    chop.position.set(Math.cos(a) * 1.35 + 0.18, 1.09, Math.sin(a) * 1.35);
+    chop.rotation.y = -a;
+    T.add(bowl, rice, chop);
+    // a round stool for each place
+    const stool = mesh(new THREE.CylinderGeometry(0.28, 0.24, 0.6, 12), toon('#8f2a22'));
+    stool.position.set(Math.cos(a) * 2.15, 0.3, Math.sin(a) * 2.15);
+    T.add(stool);
+  }
+  g.add(T);
+  // steam: soft white puffs rising from the middle dishes
+  const steam = [];
+  for (let i = 0; i < 8; i++) {
+    const s = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0, depthWrite: false }));
+    g.add(s);
+    steam.push({ m: s, off: i / 8, x: (fract1(i * 0.61) - 0.5) * 0.9, z: 2.4 + (fract1(i * 0.37) - 0.5) * 0.9 });
+  }
+  hangingLamp(g, 0, RH, 2.4, 1.9);
+  return { group: g, eye, steam };
+}
+export function animateSteam(steam, ph) {
+  for (const s of steam) {
+    const u = (ph * 10 + s.off) % 1;
+    s.m.position.set(s.x + Math.sin(u * 6 + s.off * 9) * 0.12, 1.3 + u * 1.4, s.z);
+    s.m.scale.setScalar(0.6 + u * 1.6);
+    s.m.material.opacity = Math.sin(Math.PI * u) * 0.35;
+  }
+}
+
+// 台北某個地方: two laundry poles, a string, clothes blowing in the wind.
+export function laundryLine(r, span = 2.8) {
+  const g = new THREE.Group();
+  const H = 1.5;
+  for (const s of [-1, 1]) {
+    const pole = mesh(box(0.06, H, 0.06), toon('#c9b47a'), { edges: false });
+    pole.position.set(s * span / 2, H / 2, 0);
+    const foot = mesh(box(0.2, 0.06, 0.2), toon(C.ink), { edges: false });
+    foot.position.set(s * span / 2, 0.03, 0);
+    g.add(pole, foot);
+  }
+  const sag = (x) => H - 0.05 - 0.12 * (1 - Math.pow(2 * x / span, 2));
+  const pts = [];
+  for (let i = 0; i <= 20; i++) { const x = -span / 2 + span * i / 20; pts.push(new THREE.Vector3(x, sag(x), 0)); }
+  g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: C.ink })));
+  const cols = [C.paper, C.blush, '#8fd1c4', C.yellow, '#3f8fd6', C.roofRed, '#ffffff'];
+  const items = [];
+  const kinds = ['shirt', 'towel', 'sock', 'shirt', 'towel', 'sock', 'shirt'];
+  kinds.forEach((kind, i) => {
+    const x = -span / 2 + span * (i + 0.7) / (kinds.length + 0.4);
+    const pivot = new THREE.Group();
+    pivot.position.set(x, sag(x), 0);
+    const col = cols[i % cols.length];
+    const m = toon(col, { doubleSided: true });
+    if (kind === 'shirt') {
+      const shp = new THREE.Shape();
+      shp.moveTo(-0.14, 0); shp.lineTo(-0.3, -0.08); shp.lineTo(-0.26, -0.2); shp.lineTo(-0.16, -0.16);
+      shp.lineTo(-0.16, -0.55); shp.lineTo(0.16, -0.55); shp.lineTo(0.16, -0.16); shp.lineTo(0.26, -0.2);
+      shp.lineTo(0.3, -0.08); shp.lineTo(0.14, 0); shp.lineTo(0.06, -0.06); shp.lineTo(-0.06, -0.06); shp.closePath();
+      pivot.add(mesh(new THREE.ShapeGeometry(shp), m));
+    } else if (kind === 'towel') {
+      const t = mesh(new THREE.PlaneGeometry(0.3, 0.5), m);
+      t.position.y = -0.25;
+      pivot.add(t);
+    } else {
+      const shp = new THREE.Shape();
+      shp.moveTo(-0.04, 0); shp.lineTo(0.04, 0); shp.lineTo(0.04, -0.2); shp.lineTo(0.12, -0.26); shp.lineTo(0.1, -0.3); shp.lineTo(-0.04, -0.24); shp.closePath();
+      pivot.add(mesh(new THREE.ShapeGeometry(shp), m));
+    }
+    const peg = mesh(box(0.03, 0.06, 0.03), toon(C.roofRed), { edges: false });
+    peg.position.y = 0.01;
+    pivot.add(peg);
+    g.add(pivot);
+    items.push({ pivot, k: 3 + (i % 3), off: i * 0.13 });
+  });
+  return { group: g, items };
+}
+export function animateLaundry(items, ph) {
+  for (const it of items) {
+    // a steady breeze from behind, gusting now and then
+    const gust = 0.5 + 0.5 * Math.sin(TAU * (ph * 2 + it.off * 0.5));
+    it.pivot.rotation.x = -(0.2 + 0.35 * gust) + Math.sin(TAU * (ph * it.k * 4 + it.off)) * 0.12;
+    it.pivot.rotation.z = Math.sin(TAU * (ph * it.k * 3 + it.off * 2)) * 0.08;
+  }
+}
+
+// 未接來電: an old rotary phone, a mobile phone, a little radio.
+export function rotaryPhone(color = C.roofRed) {
+  const g = new THREE.Group();
+  const base = mesh(box(0.9, 0.35, 0.7), toon(color));
+  base.position.y = 0.18;
+  const slope = mesh(box(0.8, 0.12, 0.45), toon(color));
+  slope.position.set(0, 0.38, 0.05);
+  slope.rotation.x = -0.35;
+  const dial = mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.04, 16), toon(C.paper));
+  dial.position.set(0, 0.47, 0.12);
+  dial.rotation.x = -0.35 + Math.PI / 2 - Math.PI / 2;
+  const handset = new THREE.Group();
+  handset.position.y = 0.55;
+  const grip = mesh(box(0.85, 0.09, 0.14), toon(color));
+  const e1 = mesh(box(0.2, 0.14, 0.22), toon(color)); e1.position.x = -0.4;
+  const e2 = mesh(box(0.2, 0.14, 0.22), toon(color)); e2.position.x = 0.4;
+  handset.add(grip, e1, e2);
+  g.add(base, slope, dial, handset);
+  return { group: g, handset };
+}
+export function mobilePhone() {
+  const g = new THREE.Group();
+  const body = mesh(box(0.4, 0.8, 0.06), toon(C.ink));
+  const scr = new THREE.Mesh(new THREE.PlaneGeometry(0.34, 0.68), new THREE.MeshBasicMaterial({ color: '#9fd3ea' }));
+  scr.position.z = 0.032;
+  g.add(body, scr);
+  return { group: g, screen: scr };
+}
+export function radio(color = '#8fd1c4') {
+  const g = new THREE.Group();
+  const body = mesh(box(1.0, 0.6, 0.35), toon(color));
+  const grille = mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.02, 16), toon(C.ink), { edges: false });
+  grille.rotation.x = Math.PI / 2;
+  grille.position.set(-0.22, 0, 0.18);
+  const dialR = mesh(box(0.34, 0.12, 0.02), toon(C.paper), { edges: false });
+  dialR.position.set(0.22, 0.1, 0.18);
+  for (const x of [0.12, 0.32]) {
+    const k = mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.05, 8), toon(C.ink), { edges: false });
+    k.rotation.x = Math.PI / 2;
+    k.position.set(x, -0.12, 0.19);
+    g.add(k);
+  }
+  const ant = mesh(box(0.02, 0.8, 0.02), toon('#c9d3e0'), { edges: false });
+  ant.position.set(0.4, 0.65, 0);
+  ant.rotation.z = -0.35;
+  const handle = mesh(box(0.6, 0.05, 0.05), toon(C.ink), { edges: false });
+  handle.position.set(0, 0.36, 0);
+  g.add(body, grille, dialR, ant, handle);
+  return { group: g };
 }

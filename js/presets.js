@@ -99,13 +99,23 @@ export const CAMERA_PRESETS = [
   },
   {
     id: 'luggage', name: 'Baggage Belt',
-    anchor: 'luggage', target: [0, 1.0, 0], azimuth: 25, elevation: 20, distance: 40, zoom: 2.4,
+    anchor: 'luggage', target: [0, 2.6, 0], azimuth: 25, elevation: 20, distance: 40, zoom: 1.8,
     atmosphere: 'between',
   },
   {
     id: 'plane', name: 'Airliner',
     anchor: 'airplane', target: [0, 0, 0], azimuth: 30, elevation: 62, distance: 30, zoom: 3.2,
     atmosphere: 'harbor',
+  },
+  {
+    id: 'portals', name: 'Portals',
+    anchor: 'world', target: [0, 18.5, -4], azimuth: 12, elevation: 12, distance: 80, zoom: 1.35,
+    atmosphere: 'late',
+  },
+  {
+    id: 'lamp', name: 'Street Light',
+    anchor: 'lamp', target: [0, 1.0, 0], azimuth: 15, elevation: 10, distance: 30, zoom: 4.2,
+    atmosphere: 'late',
   },
   {
     id: 'subway', name: 'Subway Island',
@@ -126,6 +136,42 @@ export const CAMERA_PRESETS = [
     id: 'flyers', name: 'Flying Houses',
     anchor: 'world', target: [0, 4, -1], azimuth: -25, elevation: -8, distance: 140, zoom: 0.62,
     atmosphere: 'between', effects: { timezone: 0.4 },
+  },
+  {
+    id: 'apple', name: 'Big Apple',
+    anchor: 'appleOrbit', frame: 'local', target: [0, 0, 0], azimuth: 20, elevation: 12, distance: 40, zoom: 2.0,   // orbits the apple once per loop
+  },
+  {
+    id: 'windmill', name: 'Windmill Island',
+    anchor: 'windmill', target: [0, 3.6, 0], azimuth: -10, elevation: 10, distance: 40, zoom: 2.4,
+  },
+  {
+    id: 'departures', name: 'Departures Board',
+    anchor: 'departures', target: [0, 0.3, 0], azimuth: 0, elevation: 4, distance: 40, zoom: 2.8,
+  },
+  {
+    id: 'clock', name: 'Big Clock',
+    anchor: 'clock', target: [0, 0.3, 0], azimuth: -20, elevation: 5, distance: 40, zoom: 2.5,
+  },
+  {
+    id: 'dining', name: 'Dining Room (round table)',
+    anchor: 'dining', frame: 'local', target: [0, -0.85, 0], azimuth: 6, elevation: 10, distance: 4.4, zoom: 5.9,
+  },
+  {
+    id: 'lookout', name: 'Lookout (room in Taiwan)',
+    anchor: 'lookout', frame: 'local', target: [0, -0.45, 0], azimuth: 12, elevation: 7, distance: 4.2, zoom: 5.8,
+  },
+  {
+    id: 'bathroom', name: 'Bathroom (floating house)',
+    anchor: 'bathroom', frame: 'local', target: [0, -0.55, 0], azimuth: -10, elevation: 8, distance: 3.4, zoom: 7.6,
+  },
+  {
+    id: 'twobirds', name: 'Two Birds',
+    anchor: 'tw', target: [0, 3.5, 0], azimuth: 12, elevation: 20, distance: 40, zoom: 1.25,
+  },
+  {
+    id: 'roadtrip', name: 'Road Trip (bus round Taiwan)',
+    anchor: 'roadBus', frame: 'local', target: [0, 0.3, 0.6], azimuth: 205, elevation: 26, distance: 40, zoom: 4.6,
   },
 ];
 

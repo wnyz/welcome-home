@@ -17,7 +17,7 @@ const TYPES = {
 };
 
 // A bird is just two flat wings, one color: a drawn "︶︶" in the sky.
-function makeBird(type) {
+export function makeBird(type) {
   const t = TYPES[type];
   const g = new THREE.Group();
   const mat = new THREE.MeshBasicMaterial({ color: t.color, side: THREE.DoubleSide });

@@ -4,15 +4,17 @@
 
 import * as THREE from 'three';
 import { CHANNEL_NAME, LOOP_SECONDS, WORLD, TIMES, sunHeight, loadState, sanitize } from './config.js';
-import { shared, setStrokeMode } from './materials.js';
+import { shared, setStrokeMode, inkLine } from './materials.js';
 import { makeMemoryAtlas, loadMemoryImages } from './memories.js';
 import { createWorld } from './world.js';
+import { createWeather } from './weather.js';
 import { createClouds } from './clouds.js';
 import { createBirds } from './birds.js';
 import { createCameraRig } from './camera.js';
 import { createFreecam } from './freecam.js'; // TEMP free camera
 import { presetById, TOUR, TOUR_SECONDS } from './presets.js';
 import { relayListener } from './relay.js';
+import { LAMP_HALOS } from './architecture.js';
 
 THREE.ColorManagement.enabled = false; // treat every hex color as-is, like ink on paper
 const TAU = Math.PI * 2;
@@ -31,12 +33,35 @@ renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
 stage.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 600);
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 1200);
 const rt = new THREE.WebGLRenderTarget(4, 4, { samples: 4 });
 
 shared.uAtlas.value = makeMemoryAtlas();
 loadMemoryImages(shared.uAtlas.value);
 const world = createWorld();
+const weather = createWeather(world);
+
+// lines-only mode: outlines light on black, no fills, no glows or clouds
+let linesMode = false;
+const blackFill = new THREE.MeshBasicMaterial({
+  color: 0x000000, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+});
+function setLinesMode(on) {
+  linesMode = on;
+  scene.traverse((o) => {
+    if ((o.isLine || o.isLineSegments) && o.material && o.material.isLineBasicMaterial) {
+      if (on) o.layers.enable(1); else o.layers.disable(1);
+      const m = o.material;
+      if (m === inkLine) return;          // the ink itself is recolored by setStrokeMode
+      if (m.userData.orig === undefined) m.userData.orig = m.color.getHex();
+      m.color.setHex(on ? 0xf3ead8 : m.userData.orig);
+    }
+    if (o.isSprite) o.visible = !on;
+  });
+  setStrokeMode(on ? 'lines' : strokeMode);
+  clouds.group.visible = !on;
+}
+let rainOn = 1, snowOn = 1;
 scene.add(world.group);
 const clouds = createClouds();
 scene.add(clouds.group);
@@ -72,6 +97,9 @@ const post = new THREE.ShaderMaterial({
     uWashA: { value: new THREE.Color() },
     uWashB: { value: new THREE.Color() },
     uAir: { value: 0 },
+    uBlack: { value: 0 },                       // fade from black (song 1 arrival)
+    uRipple: { value: 0 },                      // water-ripple distortion
+    uLines: { value: 0 },                       // lines-only mode: black ground
     uNightA: shared.uNightA,
     uNightB: shared.uNightB,
     uWashK: { value: new THREE.Vector2() },     // how much each side's hour colors the sky
@@ -92,7 +120,8 @@ const post = new THREE.ShaderMaterial({
     uniform float uPx;
     uniform vec3 uTop, uMid, uBot;
     uniform float uTime, uLoop, uGrain, uFrame, uHalftone;
-    uniform float uTz, uGlowR, uAir, uNightA, uNightB, uSplit, uLeftA, uSunRA;
+    uniform float uRipple, uLines;
+    uniform float uTz, uGlowR, uAir, uBlack, uNightA, uNightB, uSplit, uLeftA, uSunRA;
     uniform vec2 uWashK, uSunUvA, uSunUvB, uMoonUvA, uMoonUvB, uSunAmt, uMoonAmt;
     uniform vec2 uGlowA, uGlowB;
     uniform vec3 uGlowColA, uGlowColB, uWashA, uWashB;
@@ -212,18 +241,17 @@ const post = new THREE.ShaderMaterial({
       return smoothstep(0.35, 0.75, a);
     }
 
-    // looking out of an airliner: a row of five rounded windows in the cabin
-    // wall, shades up, with clouds drifting past outside
+    // looking out of an airliner: three rounded windows in the cabin wall,
+    // well apart, shades up, with clouds drifting past outside
     vec3 airplaneWindow(vec3 col, vec2 uv) {
       vec2 asp = vec2(uRes.x / uRes.y, 1.0);
       vec2 c = (uv - 0.5) * asp;
-      float e = uAir * uAir * (3.0 - 2.0 * uAir);
-      float s = mix(3.2, 1.0, e);
+      float s = 1.0;
       vec2 hs = vec2(0.11, 0.16) * s;
       float rad = 0.085 * s;
-      float gap = 0.33 * s;
-      // nearest of the five windows
-      float k = clamp(floor(c.x / gap + 0.5), -2.0, 2.0);
+      float gap = 0.56 * s;
+      // nearest of the three windows
+      float k = clamp(floor(c.x / gap + 0.5), -1.0, 1.0);
       vec2 lc = c - vec2(k * gap, 0.02 * s);
       vec2 q = abs(lc) - hs + rad;
       float sd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - rad;
@@ -260,10 +288,23 @@ const post = new THREE.ShaderMaterial({
       vec2 uv = vUv;
       vec2 fc = floor(gl_FragCoord.xy / uPx);
 
+      // ripple: the picture wavers like it's seen through water (a blurred memory)
+      if (uRipple > 0.001) {
+        float rp = uTime / uLoop;
+        vec2 asp = vec2(uRes.x / uRes.y, 1.0);
+        vec2 c = (uv - 0.5) * asp;
+        float r = length(c);
+        vec2 w = vec2(sin(uv.y * 26.0 + TAU * rp * 12.0) + 0.5 * sin(uv.y * 61.0 - TAU * rp * 20.0),
+                      sin(uv.x * 19.0 + TAU * rp * 9.0) + 0.4 * sin(uv.x * 47.0 + TAU * rp * 15.0));
+        vec2 rad = c / (r + 1e-4) * sin(r * 48.0 - TAU * rp * 16.0) * smoothstep(0.9, 0.1, r);
+        uv += (w * 0.0035 + rad * 0.0045) * uRipple / asp;
+      }
+
       vec4 s = texture2D(tScene, uv);
 
-      vec3 col = sky(uv) * (1.0 - s.a) + s.rgb;   // scene is premultiplied
-      if (uAir > 0.001) col = airplaneWindow(col, vUv);
+      vec3 ground = uLines > 0.5 ? vec3(0.012, 0.012, 0.02) : sky(uv);
+      vec3 col = ground * (1.0 - s.a) + s.rgb;   // scene is premultiplied
+      if (uAir > 0.001) col = mix(col, airplaneWindow(col, vUv), uAir);
 
       float n1 = hash(fc) - 0.5;
       float n2 = hash(floor(fc / 2.0) + 17.0) - 0.5;
@@ -275,6 +316,7 @@ const post = new THREE.ShaderMaterial({
 
       vec2 vc = vUv - 0.5;
       col *= 1.0 - dot(vc, vc) * 0.16;
+      col *= 1.0 - uBlack;
       gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
     }`,
   depthTest: false,
@@ -323,11 +365,19 @@ if (params.get('preset')) {
   const p = presetById(params.get('preset'));
   target = { ...target, cameraPreset: p.id, zoom: p.zoom, cameraAngle: p.elevation, cameraOrbit: 0, tour: false };
 }
+// ?stroke=lines&ripple=0.6&twHour=22 ... sets any setting at start (for checking looks)
+for (const [k, v] of params) {
+  if (k === 'preset' || !(k in target)) continue;
+  if (typeof target[k] === 'number' && Number.isFinite(+v)) target[k] = +v;
+  else if (typeof target[k] === 'string') target[k] = v;
+  else if (typeof target[k] === 'boolean') target[k] = v === '1' || v === 'true';
+}
 const EASED = [
   'rotationSpeed', 'floatIntensity', 'birdSpeed', 'zoom', 'cameraAngle', 'cameraOrbit',
   'cameraPanX', 'cameraPanY', 'cameraPanZ',
   'windowLight', 'clouds', 'cloudDensity', 'cloudOpacity', 'cloudDrift', 'cloudSoftness',
-  'halftone', 'grain', 'timezone', 'darkness', 'split',
+  'halftone', 'grain', 'timezone', 'darkness', 'split', 'rain', 'snow',
+  'breathe', 'quake', 'ripple',
 ];
 const cur = {};
 for (const k of EASED) cur[k] = target[k];
@@ -367,6 +417,7 @@ let angle = 0;        // island rotation (accumulated so speed changes never jum
 let birdPhase = 0;
 let cloudPhase = 0;
 let air = 0;
+let blackStart = -1;   // when the fade from black began (song 1)
 let lastCue = target.cameraCue;
 let easeBoostUntil = 0, easeRate = 2.4;
 let strokeMode = null;
@@ -387,7 +438,12 @@ function applyState(s, ease) {
     lastCue = target.cameraCue;
     const p = presetById(target.cameraPreset);
     if (!target.tour) {
-      rig.go(target.cameraPreset, target.transition * (p.durationScale || 1), nowSec);
+      if (p.overlay === 'airplane') {
+        // song 1: start from black and fade in on the windows
+        rig.jump(target.cameraPreset);
+        blackStart = nowSec;
+        air = 1;
+      } else rig.go(target.cameraPreset, target.transition * (p.durationScale || 1), nowSec);
       // the rig interpolates zoom/angle itself during a transition
       cur.zoom = target.zoom; cur.cameraAngle = target.cameraAngle; cur.cameraOrbit = target.cameraOrbit;
       cur.cameraPanX = target.cameraPanX; cur.cameraPanY = target.cameraPanY; cur.cameraPanZ = target.cameraPanZ;
@@ -493,6 +549,7 @@ function toUv(v, out) {
 }
 const nyCenter = new THREE.Vector3(), twCenter = new THREE.Vector3();
 const camPan = new THREE.Vector3();
+const haloPos = new THREE.Vector3();
 const viewDir = new THREE.Vector3();
 
 let last = performance.now();
@@ -526,7 +583,7 @@ function tick(now) {
   shared.uNightA.value = LA.night * cur.darkness;
   shared.uNightB.value = LB.night * cur.darkness;
 
-  if (strokeMode !== target.stroke) { strokeMode = target.stroke; setStrokeMode(strokeMode); }
+  if (strokeMode !== target.stroke) { strokeMode = target.stroke; setStrokeMode(strokeMode); setLinesMode(strokeMode === 'lines'); }
 
   if (target.autoAnimate) {
     t += dt;
@@ -552,6 +609,7 @@ function tick(now) {
 
   // ---- shared uniforms
   shared.uTime.value = loopT;
+  shared.uPxH.value = renderer.domElement.height;
   shared.uWindowLight.value = cur.windowLight;
   shared.uTz.value = 1;     // the hour's tint always applies (day tint is white)
   shared.uTintA.value.copy(tzCur.A.tint); shared.uTintB.value.copy(tzCur.B.tint);
@@ -564,7 +622,13 @@ function tick(now) {
     floatI: cur.floatIntensity, houseCount: target.houseCount,
     showMain: target.showMain, showSatellites: target.showSatellites,
     airplaneVisible: target.airplane && air < 0.5,
+    presetId: rig.preset.id,
+    breathe: cur.breathe, quake: cur.quake,
   });
+  // weather switches fade in and out over about a second
+  rainOn += ((target.rainOn ? 1 : 0) - rainOn) * Math.min(1, dt * 2.5);
+  snowOn += ((target.snowOn ? 1 : 0) - snowOn) * Math.min(1, dt * 2.5);
+  weather.update({ rain: cur.rain * rainOn, snow: cur.snow * snowOn, pxH: renderer.domElement.height });
   world.islands[0].root.getWorldPosition(nyCenter);
   world.islands[1].root.getWorldPosition(twCenter);
   birds.update({
@@ -579,9 +643,15 @@ function tick(now) {
   camera.getWorldDirection(viewDir);
   shared.uViewDir.value.copy(viewDir);
 
+  // the cabin windows: in quickly, out in about 0.8 s, no zooming
   const airTarget = rig.preset.overlay === 'airplane' ? 1 : 0;
-  air += (airTarget - air) * (1 - Math.exp(-dt * 1.3));
-  if (Math.abs(airTarget - air) < 0.001) air = airTarget;
+  air = airTarget ? Math.min(1, air + dt / 0.8) : Math.max(0, air - dt / 0.8);
+  let black = 0;
+  if (blackStart >= 0) {
+    const u = Math.min(1, Math.max(0, (nowSec - blackStart - 0.4) / 3));
+    black = 1 - u * u * (3 - 2 * u);
+    if (u >= 1) blackStart = -1;
+  }
 
   clouds.update({
     phase: cloudPhase, ph, camera, camTarget: rig.pose.target,
@@ -600,17 +670,25 @@ function tick(now) {
   const leftA = posA.x <= posB.x;
   const sp = cur.split;
   const clampX = (x, isLeft) => Math.min(THREE.MathUtils.lerp(0.9, isLeft ? 0.42 : 0.9, sp), Math.max(THREE.MathUtils.lerp(0.1, isLeft ? 0.1 : 0.58, sp), x));
-  const sunUv = (L, pos, isLeft, out) => out.set(clampX(pos.x, isLeft), 0.6 + 0.25 * Math.min(1, Math.max(0, L.e)));
-  const moonUv = (pos, isLeft, out) => out.set(clampX(pos.x, isLeft), 0.79);
-  const sunAmt = (L) => fall(-0.15, 0.05, L.e);
+  // one sun and one moon: the sun goes to whichever island is more in
+  // daylight, the moon to the other; they slide past each other at 06:00 and
+  // 18:00 and always keep apart
   const U = post.uniforms;
-  sunUv(LA, posA, leftA, U.uSunUvA.value).lerp(pinSun, henge);
-  sunUv(LB, posB, !leftA, U.uSunUvB.value);
-  moonUv(posA, leftA, U.uMoonUvA.value);
-  moonUv(posB, !leftA, U.uMoonUvB.value);
+  const xA = clampX(posA.x, leftA), xB = clampX(posB.x, !leftA);
+  const sA = fall(-0.12, 0.12, LA.e - LB.e);            // 1 = New York has the sun
+  let sunX = THREE.MathUtils.lerp(xB, xA, sA), moonX = THREE.MathUtils.lerp(xA, xB, sA);
+  const sunY = 0.6 + 0.22 * Math.min(1, Math.max(0, Math.max(LA.e, LB.e)));
+  const moonY = 0.86;
+  if (Math.abs(sunX - moonX) < 0.2) {
+    const mid = (sunX + moonX) / 2, dir = (sunX >= moonX ? 1 : -1);
+    sunX = Math.min(0.92, Math.max(0.08, mid + dir * 0.1));
+    moonX = Math.min(0.92, Math.max(0.08, mid - dir * 0.1));
+  }
+  U.uSunUvA.value.set(sunX, sunY).lerp(pinSun, henge);
+  U.uMoonUvA.value.set(moonX, moonY);
   U.uSunRA.value = THREE.MathUtils.lerp(0.05, pinR, henge);
-  U.uSunAmt.value.set(Math.max(sunAmt(LA), henge), sunAmt(LB)).multiplyScalar(1 - air);
-  U.uMoonAmt.value.set(LA.night * (1 - henge), LB.night).multiplyScalar(1 - air);
+  U.uSunAmt.value.set(1 - air, 0);
+  U.uMoonAmt.value.set((1 - henge) * (1 - air), 0);
   U.uWashK.value.set(tzCur.A.washK, tzCur.B.washK);
   U.uSplit.value = sp;
   U.uLeftA.value = leftA ? 1 : 0;
@@ -623,6 +701,18 @@ function tick(now) {
   post.uniforms.uHalftone.value = cur.halftone;
   post.uniforms.uFrame.value = frame;
   post.uniforms.uAir.value = air;
+  post.uniforms.uBlack.value = black;
+  post.uniforms.uRipple.value = cur.ripple;
+  post.uniforms.uLines.value = linesMode ? 1 : 0;
+
+  // street lamps glow with the night on their side of the world
+  for (const h of LAMP_HALOS) {
+    h.getWorldPosition(haloPos);
+    const w = fall(WORLD.tzBlend[0], WORLD.tzBlend[1], haloPos.x);
+    const n = shared.uNightA.value + (shared.uNightB.value - shared.uNightA.value) * w;
+    h.material.opacity = Math.min(0.5, n * 0.5);   // kept soft: many glows overlap
+    h.visible = n > 0.02 && !linesMode;
+  }
   toUv(proj.copy(nyCenter).add(new THREE.Vector3(0, -3, 0)), post.uniforms.uGlowA.value);
   toUv(proj.copy(twCenter).add(new THREE.Vector3(0, -3, 0)), post.uniforms.uGlowB.value);
   post.uniforms.uGlowR.value = Math.min(1.4, Math.max(0.08, 15 * camera.zoom / (2 * halfH0)));
@@ -634,7 +724,20 @@ function tick(now) {
   renderer.setRenderTarget(rt);
   renderer.setClearColor(0x000000, 0);
   renderer.clear();
-  renderer.render(scene, camera);
+  if (linesMode) {
+    // pass 1: every surface in flat black (it hides the lines behind it);
+    // pass 2: only the outlines, drawn light on top
+    scene.overrideMaterial = blackFill;
+    renderer.render(scene, camera);
+    scene.overrideMaterial = null;
+    camera.layers.set(1);
+    renderer.autoClear = false;
+    renderer.render(scene, camera);
+    renderer.autoClear = true;
+    camera.layers.set(0);
+  } else {
+    renderer.render(scene, camera);
+  }
   renderer.setRenderTarget(null);
   renderer.render(postScene, postCam);
 

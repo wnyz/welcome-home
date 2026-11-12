@@ -31,7 +31,12 @@ export function createCameraRig(camera, anchors) {
     des.target.applyQuaternion(q).add(p);
     const az = d2r((pr.azimuth || 0) + orbit), el = d2r(Math.min(85, Math.max(-20, elevation)));
     des.dir.set(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el)).applyQuaternion(q).normalize();
+    // Orthographic, so distance doesn't change the picture, only what gets cut
+    // off in front. Normal views sit far back so nothing in front is clipped;
+    // the few short distances (< 20) are deliberate cutaways (window close-ups,
+    // Manhattanhenge street level) and stay as they are.
     des.dist = pr.distance ?? 100;
+    if (des.dist >= 20) des.dist = 320;
     des.zoom = Math.max(0.05, zoom);
   }
 

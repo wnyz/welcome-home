@@ -11,7 +11,12 @@ import {
   lighthouse, airplane, satellitePlatform, islandPlinth,
   mountainRange, utilityPole, flyingHouse, subwayEntrance, busStop, grove,
   manhattanGrid, skyscraper, taxi, suspensionBridge, ladderToWindow, bag as makeBag, luggageHill,
+  streetLamp, spiralStairs, portal,
+  miniBus, animateBusStop, animateLuggage, lookoutRoom, bathroomRoom, ringRoad,
+  bigApple, windmill, departuresBoard,
+  schoolFish, bigClock, fireflies, diningRoom, animateSteam, laundryLine, animateLaundry, rotaryPhone, mobilePhone,
 } from './architecture.js';
+import { makeBird } from './birds.js';
 import { LIGHTS, toon, mesh, faceted } from './materials.js';
 
 const TAU = Math.PI * 2;
@@ -252,11 +257,12 @@ export function createWorld() {
   nyDoor.rotation.y = -Math.PI / 2;
   ny.spinner.add(nyDoor);
 
-  // ---- New York: a suspension bridge off the northern tip, ending in a window
-  takeSlot('M', 10.64);
+  // ---- a suspension bridge floating on its own off New York's west side,
+  // leading nowhere but into a window
   const bridge = suspensionBridge(rand(9), 7.5);
-  bridge.group.position.set(11.3, 0, 0);
-  ny.spinner.add(bridge.group);
+  const bridgeBase = new V3(-30, -3.5, 13.5);
+  bridge.group.position.copy(bridgeBase);
+  world.add(bridge.group);
   anchors.bridgeWindow = bridge.window;
 
   // ---- New York: yellow cabs. Two loops (an inner and an outer lane) around
@@ -353,6 +359,17 @@ export function createWorld() {
     p.group.rotation.y = pr.chance(0.5) ? 0 : Math.PI / 2;
     h.holder.add(p.group);
     twPoles.push({ ...p, owner: h });
+  });
+  // street lamps in the lanes: on the front corner without a pole
+  tw.houses.forEach((h) => {
+    if (!pr.chance(0.65)) return;
+    const bb = localBox(h.inner);
+    const pole = twPoles.find(tp => tp.owner === h);
+    const side = pole ? -Math.sign(pole.group.position.x || 1) : (pr.chance(0.5) ? 1 : -1);
+    const lamp = streetLamp(1.35);
+    lamp.position.set(side * (bb.max.x + 0.18), 0, bb.max.z + 0.18);
+    lamp.rotation.y = side > 0 ? -Math.PI / 2 : Math.PI / 2;
+    h.holder.add(lamp);
   });
   const wireMat = new THREE.LineBasicMaterial({ color: '#1c2550' });
   const wires = Array.from({ length: 90 }, () => {
@@ -485,7 +502,10 @@ export function createWorld() {
     if (content) g.add(content);
     world.add(g);
     if (name) anchors[name] = g;
-    const s = { g, base: g.position.clone(), ph: r.next(), k: r.i(1, 3), vis: 1, yaw: yaw ?? sats.length, still };
+    const s = {
+      g, base: g.position.clone(), ph: r.next(), k: r.i(1, 3), vis: 1, yaw: yaw ?? sats.length, still,
+      spin: name === 'lighthouse' ? 0 : (sats.length % 2 ? 1 : -1),
+    };
     sats.push(s);
     return s;
   }
@@ -502,8 +522,13 @@ export function createWorld() {
   const tiny = gableHouse(r, { w: 1.0, d: 1.1, h: 0.75, wall: C.softYellow, roof: C.green, door: C.roofBlue });
   satellite('tinyHouse', [34, 3.5, 11], satellitePlatform(1.2, 6, C.paper, [C.softGreen, C.roofBlue]), tiny.group);
 
-  satellite('stairs', [-37, 4.5, 9], satellitePlatform(1.6, 5, C.paper, [C.salmon, C.roofBlue]), stairsToNowhere());
+  satellite('stairs', [-37, 4.5, 9], satellitePlatform(1.6, 5, C.paper, [C.salmon, C.roofBlue]), spiralStairs());
   satellite('wall', [33, -3.5, -13], satellitePlatform(1.5, 6, C.cream, [C.blush, C.skyBlue]), gableWall(r));
+  satellite('lamp', [-27, 5, -15], satellitePlatform(1.0, 6, C.paper, [C.softYellow, C.roofBlue]), streetLamp(1.9));
+  // ---- round 8: a windmill island
+  const mill = windmill();
+  satellite('windmill', [38, 0.5, -1], satellitePlatform(1.6, 7, '#bfe0a8', [C.softGreen, C.roofBlue]), mill.group);
+
 
   // ---------------------------------------------------- mid islands
   // Between the two main islands and the small ones in size.
@@ -515,74 +540,204 @@ export function createWorld() {
   midIsland('subway', [-5.5, -3, 12.5], 3.2,
     { top: C.sidewalk, layers: [C.salmon, C.roofRed, C.roofBlue], tip: [C.blush, C.roofBlue] },
     subwayEntrance(), 0.35);
+  const busStopG = busStop(rand(61));
   midIsland('busStop', [3.5, 2.5, 13.5], 3.3,
     { top: '#bfe0a8', layers: [C.tileMint, C.softGreen, C.roofBlue], tip: [C.softYellow, C.roofBlue] },
-    busStop(rand(61)), -0.1);
+    busStopG, -0.1);
   midIsland('grove', [-1.5, -4.2, -12.5], 2.9,
     { top: '#9ccf6e', layers: [C.wallYellow, C.green, C.roofBlue], tip: [C.softYellow, C.roofBlue] },
     grove(rand(73)), 0.2);
 
   // ---------------------------------------------------- the baggage belt
-  // One long conveyor loop under and around both main islands, passing over
-  // a hill of luggage. Bags ride it all the way round, one lap per loop.
-  const BELT = { c: [-2, -8.5, 0], a: 37, b: 25, w: 0.8 };
-  const beltPts = [];
-  for (let i = 0; i < 260; i++) {
-    const t = (i / 260) * TAU;
-    beltPts.push(new V3(BELT.c[0] + Math.sin(t) * BELT.a, BELT.c[1], BELT.c[2] + Math.cos(t) * BELT.b));
+  // Two belt rings linked like two links of a chain: one lying nearly flat
+  // around and under New York, one tilted around and under Taiwan. They pass
+  // through each other over the luggage island in the middle. Bags ride both.
+  const RINGS = [
+    { c: [-9, -8.5, 1], R: 11, tilt: 0 },                       // New York link
+    { c: [12, -8.5, 0], R: 13, tilt: THREE.MathUtils.degToRad(25) }, // Taiwan link
+  ];
+  const ringPts = (ring, n = 220) => Array.from({ length: n }, (_, i) => {
+    const t = (i / n) * TAU;
+    const [cx, cy, cz] = ring.c;
+    // a gentle rise and dip; zero where the links meet over the island
+    const bob = 0.8 * Math.sin(2 * t);
+    return new V3(cx + Math.cos(t) * ring.R, cy + Math.sin(t) * ring.R * Math.sin(ring.tilt) + bob, cz + Math.sin(t) * ring.R * Math.cos(ring.tilt));
+  });
+  // arc-length lookup along a closed loop of points
+  function loopPath(pts) {
+    const len = [0];
+    for (let i = 1; i <= pts.length; i++) len.push(len[i - 1] + pts[i - 1].distanceTo(pts[i % pts.length]));
+    const L = len[pts.length];
+    return {
+      pts, L,
+      at(d, out, tan) {
+        d = ((d % L) + L) % L;
+        let lo = 0, hi = pts.length;
+        while (hi - lo > 1) { const m = (lo + hi) >> 1; if (len[m] <= d) lo = m; else hi = m; }
+        const a0 = pts[lo], a1 = pts[(lo + 1) % pts.length];
+        out.lerpVectors(a0, a1, (d - len[lo]) / (len[lo + 1] - len[lo]));
+        if (tan) tan.subVectors(a1, a0).normalize();
+        return out;
+      },
+    };
   }
-  const beltLen = [0];
-  for (let i = 1; i <= beltPts.length; i++) beltLen.push(beltLen[i - 1] + beltPts[i - 1].distanceTo(beltPts[i % beltPts.length]));
-  const beltL = beltLen[beltPts.length];
-  const beltAt = (d, out, tan) => {
-    d = ((d % beltL) + beltL) % beltL;
-    let lo = 0, hi = beltPts.length;
-    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (beltLen[m] <= d) lo = m; else hi = m; }
-    const a0 = beltPts[lo], a1 = beltPts[(lo + 1) % beltPts.length];
-    const f = (d - beltLen[lo]) / (beltLen[lo + 1] - beltLen[lo]);
-    out.lerpVectors(a0, a1, f);
-    if (tan) tan.subVectors(a1, a0).normalize();
-    return out;
-  };
-  // a closed band (belt or rail) along the loop, built as one mesh
-  function band(offset, halfW, y0, y1, color) {
+  // a closed band (belt or rail) along a loop, built as one mesh
+  function band(pts, offset, halfW, dy0, dy1, color) {
     const pos = [];
     const side = new V3(), up = new V3(0, 1, 0), tn = new V3();
     const edge = (i) => {
-      const p = beltPts[i % beltPts.length];
-      tn.subVectors(beltPts[(i + 1) % beltPts.length], beltPts[(i - 1 + beltPts.length) % beltPts.length]).normalize();
+      const n = pts.length, p = pts[i % n];
+      tn.subVectors(pts[(i + 1) % n], pts[(i - 1 + n) % n]).normalize();
       side.crossVectors(up, tn).normalize();
       const c = p.clone().addScaledVector(side, offset);
       return [c.clone().addScaledVector(side, -halfW), c.clone().addScaledVector(side, halfW)];
     };
-    for (let i = 0; i < beltPts.length; i++) {
+    for (let i = 0; i < pts.length; i++) {
       const [l0, r0] = edge(i), [l1, r1] = edge(i + 1);
       const q = (a, b, c, d) => pos.push(...a, ...b, ...c, ...a, ...c, ...d);
-      const v = (p, y) => [p.x, y, p.z];
-      q(v(l0, y1), v(l1, y1), v(r1, y1), v(r0, y1));      // top
-      q(v(l0, y0), v(r0, y0), v(r1, y0), v(l1, y0));      // bottom
-      q(v(l0, y0), v(l1, y0), v(l1, y1), v(l0, y1));      // sides
-      q(v(r0, y0), v(r0, y1), v(r1, y1), v(r1, y0));
+      const v = (p, dy) => [p.x, p.y + dy, p.z];
+      q(v(l0, dy1), v(l1, dy1), v(r1, dy1), v(r0, dy1));      // top
+      q(v(l0, dy0), v(r0, dy0), v(r1, dy0), v(l1, dy0));      // bottom
+      q(v(l0, dy0), v(l1, dy0), v(l1, dy1), v(l0, dy1));      // sides
+      q(v(r0, dy0), v(r0, dy1), v(r1, dy1), v(r1, dy0));
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    return mesh(faceted(geo), toon(color), { threshold: 40 });
+    return mesh(faceted(geo), toon(color, { doubleSided: true }), { threshold: 40 });
   }
   const belt = new THREE.Group();
-  belt.add(band(0, BELT.w / 2, BELT.c[1] - 0.14, BELT.c[1], '#3a4060'));
-  for (const sd of [-1, 1]) belt.add(band(sd * (BELT.w / 2 + 0.03), 0.03, BELT.c[1] - 0.14, BELT.c[1] + 0.12, C.softYellow));
+  const loops = RINGS.map(ring => loopPath(ringPts(ring)));
+  for (const lp of loops) {
+    belt.add(band(lp.pts, 0, 0.4, -0.14, 0, '#3a4060'));
+    for (const sd of [-1, 1]) belt.add(band(lp.pts, sd * 0.43, 0.03, -0.14, 0.12, C.softYellow));
+  }
   world.add(belt);
   const riders = [];
   const br = rand(3131);
-  for (let i = 0; i < 36; i++) {
-    const b = makeBag(br, br.f(1.1, 1.5));
-    world.add(b);
-    riders.push({ g: b, off: i / 36 + br.f(-0.006, 0.006), twist: br.f(-0.4, 0.4), lie: br.chance(0.4) });
-  }
-  // the luggage hill, the belt running along its edge
-  midIsland('luggage', [BELT.c[0], BELT.c[1] - 0.06, BELT.c[2] + BELT.b - 1.3], 3.6,
+  loops.forEach((lp, li) => {
+    for (let i = 0; i < 18; i++) {
+      const b = makeBag(br, br.f(1.1, 1.5));
+      world.add(b);
+      riders.push({ g: b, lp, dir: li ? -1 : 1, off: i / 18 + br.f(-0.01, 0.01), twist: br.f(-0.4, 0.4), lie: br.chance(0.4) });
+    }
+  });
+  // the luggage island, where the two links meet: a big pile on one side, a
+  // smaller one on the other, the belts running between them
+  const luggageAnim = [];
+  midIsland('luggage', [0.5, -11.8, 0.5], 4.6,
     { top: C.sidewalk, layers: [C.blush, C.roofRed, C.roofBlue], tip: [C.softYellow, C.roofBlue] },
-    (() => { const h = luggageHill(rand(808)); h.position.set(0, 0, -1.1); return h; })(), 0, true);
+    (() => {
+      const g = new THREE.Group();
+      const big = luggageHill(rand(808), { radius: 1.3, height: 2.0 });
+      big.position.set(-3.1, 0, -0.4);
+      const small = luggageHill(rand(809), { radius: 0.9, height: 1.2 });
+      small.position.set(3.4, 0, 0.6);
+      g.add(big, small);
+      luggageAnim.push(...big.userData.anim, ...small.userData.anim);
+      return g;
+    })(), 0);
+
+  // ---------------------------------------------------- the portals
+  // Two striped portals high above everything, facing each other. Birds fly
+  // out of one, across, and vanish into the other, both ways, all loop.
+  // set on a diagonal so both striped faces read from the usual front views
+  const PORTAL = { a: new V3(-8, 18.5, -10), b: new V3(8, 18.5, 2), R: 2.8 };
+  const pAxis = PORTAL.b.clone().sub(PORTAL.a).normalize();
+  const pSide = new V3(-pAxis.z, 0, pAxis.x);
+  const pYaw = -Math.atan2(pAxis.z, pAxis.x);
+  const portals = [PORTAL.a, PORTAL.b].map(at => {
+    const p = portal(PORTAL.R);
+    p.position.copy(at);
+    p.rotation.y = pYaw;
+    world.add(p);
+    return p;
+  });
+  anchors.portals = portals[0];
+
+  // ---- the Big Apple, floating beside New York (never landing)
+  const apple = bigApple();
+  apple.scale.setScalar(2.6);
+  world.add(apple);
+  anchors.apple = apple;
+
+  // ---- an airport departures board, drifting high across the back
+  const board = departuresBoard();
+  world.add(board);
+  anchors.departures = board;
+
+  // ---------------------------------------------------- song scenes
+  // 不想去遠方: a room looking out over Taiwan. It hangs off the island (not
+  // the spinner), far enough out that the island's tips clear it as it turns,
+  // and it only exists while its camera is on.
+  const lookout = lookoutRoom(rand(4401));
+  lookout.group.position.set(0, -0.6, 12.6);
+  tw.root.add(lookout.group);
+  anchors.lookout = lookout.eye;
+
+  // 浴室: a pink bathroom inside a floating house, its window on New York's
+  // towers.
+  const bath = bathroomRoom(rand(4402));
+  const bathBase = new V3(-17, 3.4, 16.5);
+  bath.group.position.copy(bathBase);
+  world.add(bath.group);
+  anchors.bathroom = bath.eye;
+
+  // 我想和你一起: two birds flying round Taiwan side by side, drifting apart
+  // and back together. The camera follows the point between them.
+  const pairAnchor = new THREE.Object3D();
+  world.add(pairAnchor);
+  anchors.birdPair = pairAnchor;
+  const pair = [makeBird('pigeon'), makeBird('pigeon')];
+  pair.forEach(b => { b.g.scale.setScalar(3.2); world.add(b.g); });
+  // they fly against the island's turn, so the island visibly turns behind them
+  const pairPos = (ph, out) => {
+    const th = -TAU * ph;
+    const rr = 1 + 0.15 * Math.sin(3 * th);            // swinging wider and closer as they go
+    return out.set(WORLD.tw.center[0] + Math.cos(th) * 11 * rr, 6.2 + Math.sin(2 * th) * 1.4, WORLD.tw.center[2] + Math.sin(th) * 8 * rr);
+  };
+  const ppA = new V3(), ppB = new V3(), ppSide = new V3(), ppM = new THREE.Matrix4(), ppQ = new THREE.Quaternion(), ppUp = new V3(0, 1, 0);
+  const ppE = new THREE.Euler();
+
+  // 晚安台灣: a road round Taiwan just inside the coast, lamps along it, and a
+  // little bus doing one lap per loop (evenly, by distance).
+  const ring = ringRoad(leafR);
+  tw.spinner.add(ring.group);
+  const tripBus = miniBus('#ef8a3c');
+  tripBus.scale.setScalar(0.85);
+  tw.spinner.add(tripBus);
+  anchors.roadBus = tripBus;
+  const ringLen = [0];
+  {
+    const a = new V3(), b = new V3();
+    for (let i = 1; i <= 720; i++) { ring.path((i - 1) / 720, a); ring.path(i / 720, b); ringLen.push(ringLen[i - 1] + a.distanceTo(b)); }
+  }
+  const ringAt = (u) => {             // distance fraction -> path parameter
+    const d = (((u % 1) + 1) % 1) * ringLen[720];
+    let lo = 0, hi = 720;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (ringLen[m] < d) lo = m; else hi = m; }
+    return (lo + (d - ringLen[lo]) / Math.max(1e-6, ringLen[hi] - ringLen[lo])) / 720;
+  };
+  const busA = new V3(), busB = new V3();
+
+  const portalBirds = [];
+  const pbr = rand(6061);
+  for (let i = 0; i < 24; i++) {
+    const b = makeBird(i % 2 ? 'sparrow' : 'pigeon');
+    world.add(b.g);
+    const rr = () => pbr.f(-1, 1) * PORTAL.R * 0.55;
+    portalBirds.push({
+      ...b, dir: i % 2 ? 1 : -1, k: pbr.i(4, 7), off: pbr.next(), flapPh: pbr.next(),
+      a: [rr() * 0.72, rr()], b: [rr() * 0.72, rr()], arc: pbr.f(-1.6, 1.6), side: pbr.f(-1.4, 1.4),
+    });
+  }
+  const pbPos = new V3(), pbNext = new V3(), pbM = new THREE.Matrix4(), pbQ = new THREE.Quaternion(), pbUp = new V3(0, 1, 0);
+  function portalPath(b, u, out) {
+    const from = b.dir > 0 ? PORTAL.a : PORTAL.b, to = b.dir > 0 ? PORTAL.b : PORTAL.a;
+    const e = u * u * (3 - 2 * u) * 0.25 + u * 0.75;
+    const up = b.a[0] + (b.b[0] - b.a[0]) * e + Math.sin(Math.PI * e) * b.arc;
+    const sd = b.a[1] + (b.b[1] - b.a[1]) * e + Math.sin(Math.PI * e) * b.side;
+    return out.lerpVectors(from, to, e).addScaledVector(pSide, sd).setY(out.y + up);
+  }
 
   // ---------------------------------------------------- the ladder
   // A tall ladder standing upright in the air, a window floating at its top.
@@ -594,15 +749,111 @@ export function createWorld() {
   anchors.ladder = ladder.group;
   anchors.ladderWindow = ladder.window;
 
+  // ---- round 10
+  // 魚: a soft school of fish swimming round the wind turbine. They follow
+  // one leader along a looping path, each a little behind and to the side,
+  // drifting in and out of place, so the school stretches and bunches up.
+  const fishCols = ['#EE80C0', '#C090D8', '#90CCEE', '#A8EEC0', '#6AAAE8', '#F4A8CC', '#E85860', '#EDED68', '#E85C38', '#8894E8', '#C4EC58', '#C07CD8'];
+  const fishes = [];
+  for (let i = 0; i < 22; i++) {
+    const f = schoolFish(fishCols[i % fishCols.length]);
+    const h = (n) => { const x = Math.sin((i + 1) * 12.9898 + n * 78.233) * 43758.5453; return x - Math.floor(x); };
+    f.group.scale.setScalar(0.45 + h(1) * 0.35);
+    mill.group.add(f.group);
+    fishes.push({ ...f, i, lag: i * 0.0045 + h(2) * 0.004, off: new V3(h(3) - 0.5, h(4) - 0.5, h(5) - 0.5).multiplyScalar(1.3), k: 2 + Math.floor(h(6) * 3), p: h(7) });
+  }
+  const leader = (ph, out) => {
+    const th = TAU * ph * 3;
+    const rr = 2.3 + 0.6 * Math.sin(TAU * ph * 2);
+    return out.set(Math.cos(th) * rr, 3.6 + 1.7 * Math.sin(TAU * ph * 4), Math.sin(th) * rr);
+  };
+  const fishPos = (fi, ph, out) => {
+    leader(ph - fi.lag, out);
+    const w = Math.sin(TAU * (ph * fi.k + fi.p));
+    return out.addScaledVector(fi.off, 0.75 + 0.35 * w);
+  };
+  const fA = new V3(), fB = new V3(), fM = new THREE.Matrix4(), fUp = new V3(0, 1, 0);
+
+  // 忽然之間: a big clock floating high over Taiwan's far side
+  const clock = bigClock();
+  const clockBase = new V3(25, 17, -14);
+  clock.group.position.copy(clockBase);
+  world.add(clock.group);
+  anchors.clock = clock.group;
+
+  // 我給的愛: fireflies round the window at the top of the ladder
+  ladder.window.add(fireflies(60, 2.4));
+
+  // 一桌菜: a dining room on Taiwan's far side, looking back over the island
+  const dining = diningRoom(rand(4403));
+  dining.group.position.set(0, -0.6, -12.6);
+  dining.group.rotation.y = Math.PI;
+  tw.root.add(dining.group);
+  anchors.dining = dining.eye;
+
+  // 台北某個地方: laundry drying on the grove island
+  const laundry = laundryLine(rand(4404));
+  laundry.group.position.set(0.2, 0, 1.75);
+  anchors.grove.add(laundry.group);
+
+  // Love Lee: a point that follows the apple and turns against its spin,
+  // so a camera bound to it orbits the apple
+  const appleOrbit = new THREE.Object3D();
+  world.add(appleOrbit);
+  anchors.appleOrbit = appleOrbit;
+
+  // 未接來電: a phone by New York, a phone by Taiwan, a coiled blue cord
+  // hanging between them across the gap, and two mobiles drifting nearby
+  const calls = [
+    { o: rotaryPhone(C.roofRed), at: [-9.5, 4, 10.5], kind: 'rotary' },
+    { o: rotaryPhone('#3f8fd6'), at: [10.5, 4, 10.5], kind: 'rotary' },
+    { o: mobilePhone(), at: [3.5, 8, 2], kind: 'mobile' },
+    { o: mobilePhone(), at: [-1, 12.5, 3], kind: 'mobile' },
+  ].map((c, i) => {
+    c.o.group.scale.setScalar(1.3);
+    world.add(c.o.group);
+    return { ...c, base: new V3(...c.at), i };
+  });
+  const CORD_N = 700;
+  const cordGeo = new THREE.BufferGeometry();
+  cordGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(CORD_N * 3), 3));
+  const cord = new THREE.Line(cordGeo, new THREE.LineBasicMaterial({ color: '#2f6fd0' }));
+  cord.frustumCulled = false;
+  world.add(cord);
+  const cA = new V3(), cB = new V3(), cD = new V3(), cN1 = new V3(), cN2 = new V3(), cP = new V3();
+  function updateCord(ph) {
+    calls[0].o.handset.getWorldPosition(cA); world.worldToLocal(cA);
+    calls[1].o.handset.getWorldPosition(cB); world.worldToLocal(cB);
+    cD.subVectors(cB, cA);
+    cN1.crossVectors(cD, fUp).normalize();
+    cN2.crossVectors(cN1, cD).normalize();
+    const sag = 2.8 + 0.35 * Math.sin(TAU * ph * 2);
+    const arr = cordGeo.attributes.position.array;
+    for (let k = 0; k < CORD_N; k++) {
+      const t = k / (CORD_N - 1);
+      const a = t * TAU * 110 + TAU * ph * 4;
+      const r = 0.12 * Math.min(1, t / 0.04, (1 - t) / 0.04);
+      cP.copy(cA).addScaledVector(cD, t);
+      cP.y -= sag * Math.sin(Math.PI * t);
+      cP.addScaledVector(cN1, Math.cos(a) * r).addScaledVector(cN2, Math.sin(a) * r);
+      arr[k * 3] = cP.x; arr[k * 3 + 1] = cP.y; arr[k * 3 + 2] = cP.z;
+    }
+    cordGeo.attributes.position.needsUpdate = true;
+  }
+
   // ---------------------------------------------------- flying houses
   // Paper-cut houses drifting in zero gravity: slow loops, gentle tilts, never
   // flipping over. All motion is whole cycles per loop.
   const ships = [];
   const fr = rand(4242);
   const avoid = [
-    [WORLD.ny.center, 21], [WORLD.tw.center, 13],   // New York's bridge sweeps far as it turns
+    [WORLD.ny.center, 21], [WORLD.tw.center, 13],   // (the floating bridge sits inside New York's circle)
     ...sats.map(s => [s.base.toArray(), 4.5]),
     [ladderBase.toArray(), 3],
+    [[12, -3, 11.8], 3],
+    [[-8, 18.5, -10], 4], [[8, 18.5, 2], 4],
+    [[-38, 10, -4], 7],                               // the big apple
+    [[38, 3, -1], 7],                                 // the wind turbine (tall)
   ];
   for (let tries = 0; ships.length < 26 && tries < 6000; tries++) {
     const p = [fr.f(-44, 44), fr.f(-5, 12), fr.f(-24, 22)];   // above the baggage belt
@@ -656,7 +907,7 @@ export function createWorld() {
   mtn.peaks.forEach(m => scatter.add(m, 'fragment', { outward: m.position }));
   twPoles.forEach(p => scatter.add(p.group, 'part'));
   for (const t of towers) { scatter.add(t, 'house', { outward: t.position }); scatter.addParts(t); }
-  scatter.add(bridge.group, 'house', { outward: bridge.group.position });
+  scatter.add(bridge.group, 'satellite', { dynamic: true });
   scatter.addParts(bridge.group);
   for (const t of taxis) scatter.add(t.g, 'fragment', { dynamic: true });
   for (const sh of ships) {
@@ -679,7 +930,7 @@ export function createWorld() {
   const tmpV = new V3();
   function update({
     loopT, nowSec, dt, angle, floatI, houseCount,
-    showMain, showSatellites, airplaneVisible,
+    showMain, showSatellites, airplaneVisible, presetId = '', breathe = 0.6, quake = 0.4,
   }) {
     const ph = loopT / LOOP_SECONDS;
     const a = Math.min(floatI, 1.5);                       // gentle floating amount
@@ -691,6 +942,7 @@ export function createWorld() {
       isl.vis += ((showMain ? 1 : 0) - isl.vis) * kVis;
       const sv = Math.max(0.0001, isl.vis * isl.vis * (3 - 2 * isl.vis));
       isl.root.scale.setScalar(sv);
+      isl.root.scale.y = sv * (1 + 0.012 * breathe * Math.sin(TAU * ph * 8 + idx));   // breathing
       isl.root.visible = sv > 0.002;
 
       isl.root.position.copy(isl.center);
@@ -701,6 +953,9 @@ export function createWorld() {
 
       isl.plinth.layers.forEach((m, i) => {
         m.rotation.set(0, m.userData.baseRot + Math.sin(TAU * (ph * (i + 1) + i * 0.17 + idx * 0.1)) * 0.06 * a, 0);
+        // the soft layers breathe in and out, one after another, every 15 s
+        const br = Math.sin(TAU * (ph * 8 - i * 0.12 + idx * 0.25));
+        m.scale.set(1 + 0.035 * breathe * br, 1 + 0.08 * breathe * br, 1 + 0.035 * breathe * br);
         m.position.set(0, m.userData.scatter.basePos.y, 0);
         scatter.apply(m);
       });
@@ -726,8 +981,12 @@ export function createWorld() {
           if (p >= 1) h.tween = null;
           h.cur = { x, z, ry };
         }
-        h.holder.position.set(x, lift + Math.sin(TAU * (ph * h.kBob + h.ph)) * 0.06 * a, z);
-        h.holder.rotation.set(0, ry, 0);
+        // the ground swells: a slow, smooth wave rolls across the island
+        // (every 30 s), so houses rise and sink in turn. No shaking.
+        const qLift = quake * 0.32 * (0.5 + 0.5 * Math.sin(TAU * (ph * 4 + idx * 0.5) - x * 0.3));
+        const qShake = 0;
+        h.holder.position.set(x, lift + qLift + Math.sin(TAU * (ph * h.kBob + h.ph)) * 0.06 * a, z);
+        h.holder.rotation.set(qShake, ry, qShake * 0.7);
         scatter.apply(h.holder);
         // roofs occasionally lift off, as if the house is breathing out
         h.roof.position.copy(h.roofBase);
@@ -762,9 +1021,12 @@ export function createWorld() {
       s.g.scale.setScalar(sv);
       s.g.visible = sv > 0.002;
       s.g.position.copy(s.base);
-      const sa = s.still ? 0 : a;   // the luggage island holds still under its belt
+      const sa = s.still ? 0 : a;
       s.g.position.y += Math.sin(TAU * (ph * s.k + s.ph)) * 0.45 * sa;
-      s.g.rotation.set(0, Math.sin(TAU * (ph + s.ph)) * 0.3 * sa + s.yaw, 0);
+      // one slow turn per loop (alternating directions), plus a gentle sway
+      s.g.rotation.set(0, s.yaw + s.spin * TAU * ph + Math.sin(TAU * (ph + s.ph)) * 0.3 * sa * (s.spin ? 0.3 : 1), 0);
+      const b2 = Math.sin(TAU * (ph * 8 + s.ph));                 // small islands breathe too
+      s.g.children[0].scale.set(1 + 0.03 * breathe * b2, 1 + 0.08 * breathe * b2, 1 + 0.03 * breathe * b2);
       scatter.apply(s.g);
     });
 
@@ -786,15 +1048,32 @@ export function createWorld() {
       void i;
     });
 
-    // bags on the belt: one lap per loop
+    // bags on the belts: one lap per loop, the two links running opposite ways
     for (const rd of riders) {
-      beltAt((ph + rd.off) * beltL, rd.g.position, tmpV);
-      rd.g.rotation.set(rd.lie ? -Math.PI / 2 : 0, Math.atan2(tmpV.x, tmpV.z) + rd.twist, 0, 'YXZ');
+      rd.lp.at((ph + rd.off) * rd.lp.L * rd.dir, rd.g.position, tmpV);
+      if (rd.dir < 0) tmpV.negate();
+      rd.g.rotation.set((rd.lie ? -Math.PI / 2 : 0) - Math.asin(Math.max(-1, Math.min(1, tmpV.y))), Math.atan2(tmpV.x, tmpV.z) + rd.twist, 0, 'YXZ');
       if (rd.lie) rd.g.position.y += 0.15;   // lying flat: lift it onto the belt
       rd.g.visible = showSatellites;
       scatter.apply(rd.g);
     }
     belt.visible = showSatellites;
+
+    // birds between the portals: they appear out of one and vanish into the other
+    for (const b of portalBirds) {
+      const u = ((ph * b.k + b.off) % 1 + 1) % 1;
+      portalPath(b, u, pbPos);
+      portalPath(b, Math.min(1, u + 0.004), pbNext);
+      b.g.position.copy(pbPos);
+      if (pbNext.distanceToSquared(pbPos) > 1e-8) { pbM.lookAt(pbNext, pbPos, pbUp); pbQ.setFromRotationMatrix(pbM); b.g.quaternion.copy(pbQ); }
+      const show = Math.min(1, u / 0.03, (1 - u) / 0.03) * (showSatellites ? 1 : 0);
+      b.g.visible = show > 0.01;
+      b.g.scale.setScalar(b.type.scale * Math.max(0.0001, show));
+      const flap = 0.15 + Math.sin(TAU * (ph * b.type.flap + b.flapPh)) * 0.6;
+      b.L.rotation.z = flap;
+      b.R.rotation.z = -flap;
+    }
+    portals.forEach((p, i) => { p.visible = showSatellites; p.rotation.y = pYaw + Math.sin(TAU * (ph + i * 0.5)) * 0.06; });
 
     // the ladder sways a little, the window at its top with it
     ladder.group.position.copy(ladderBase);
@@ -806,6 +1085,102 @@ export function createWorld() {
     // lighthouse: one sweep every 15 s, with small hesitations and a slow
     // up/down tilt — it is looking for something
     lh.pivot.rotation.set(0, TAU * ph * 8 + 0.25 * Math.sin(TAU * ph * 24), 0.07 * Math.sin(TAU * ph * 5));
+
+
+    // the floating bridge: a slow bob and sway
+    bridge.group.visible = showSatellites;
+    bridge.group.position.copy(bridgeBase);
+    bridge.group.position.y += Math.sin(TAU * (ph * 2 + 0.15)) * 0.35 * Math.max(0.4, a);
+    bridge.group.rotation.set(Math.sin(TAU * (ph + 0.4)) * 0.02, 0.12 + Math.sin(TAU * ph) * 0.06, Math.sin(TAU * (ph * 2 + 0.7)) * 0.015);
+    scatter.apply(bridge.group);
+
+    // ---- round 8
+    apple.visible = board.visible = showSatellites;
+    apple.position.set(-38 + Math.sin(TAU * ph) * 2.2, 10 + Math.sin(TAU * ph * 2) * 1.2, -4 + Math.cos(TAU * ph) * 2);
+    apple.rotation.set(Math.sin(TAU * ph * 2) * 0.15, TAU * ph, Math.sin(TAU * (ph + 0.3)) * 0.2);
+    mill.sails.rotation.z = -TAU * ph * 10;
+    // behind the world, so it never drifts in front of a close-up
+    board.position.set(Math.sin(TAU * ph) * 12, 14.5 + Math.sin(TAU * ph * 2) * 0.6, -20 + Math.cos(TAU * ph) * 1.5);
+    board.rotation.set(Math.sin(TAU * ph * 3) * 0.04, -0.35 * Math.sin(TAU * ph), Math.sin(TAU * ph * 2) * 0.05);
+
+
+    // ---- round 10
+    fishes.forEach(fi => {
+      fishPos(fi, ph, fA); fishPos(fi, ph + 0.003, fB);
+      fi.group.position.copy(fA);
+      fM.lookAt(fB, fA, fUp); fi.group.quaternion.setFromRotationMatrix(fM);
+      fi.tail.rotation.y = Math.sin(TAU * (ph * 150 + fi.p * 5)) * 0.45;
+    });
+    clock.group.visible = showSatellites;
+    clock.group.position.copy(clockBase);
+    clock.group.position.y += Math.sin(TAU * ph * 2) * 0.4;
+    clock.group.rotation.set(Math.sin(TAU * (ph + 0.2)) * 0.05, -0.35 + Math.sin(TAU * ph) * 0.12, Math.sin(TAU * ph * 3) * 0.04);
+    // time runs fast: the minute hand goes round every 10 s, the second
+    // hand whirls, and the face breathes, a little out of shape
+    clock.minute.rotation.z = -TAU * ph * 12;
+    clock.hour.rotation.z = -TAU * ph - 1.2;
+    clock.second.rotation.z = -TAU * ph * 60;
+    const cb = Math.sin(TAU * ph * 4);
+    clock.body.scale.set(1 + 0.05 * cb, 1 - 0.04 * cb, 1);
+    clock.body.rotation.z = Math.sin(TAU * ph * 2) * 0.08;
+    dining.group.visible = presetId === 'dining';
+    if (dining.group.visible) animateSteam(dining.steam, ph);
+    animateLaundry(laundry.items, ph);
+    appleOrbit.position.copy(apple.position);
+    appleOrbit.rotation.set(0, -TAU * ph, 0);
+    calls.forEach(c => {
+      const g = c.o.group;
+      g.visible = showSatellites;
+      g.position.copy(c.base);
+      g.position.y += Math.sin(TAU * (ph * 2 + c.i * 0.17)) * 0.5;
+      const turn = c.kind === 'rotary' ? (c.i ? -2.4 : 2.4) + Math.sin(TAU * ph) * 0.3 : TAU * ph * (c.i % 2 ? 1 : -1) + c.i;   // the phones face each other
+      g.rotation.set(Math.sin(TAU * (ph + c.i * 0.3)) * 0.15, turn, Math.sin(TAU * (ph * 2 + c.i * 0.2)) * 0.12);
+      // ringing: every 15 s, a few seconds of buzzing
+      const ring = ((ph * 8 + c.i * 0.13) % 1) < 0.25;
+      if (ring) { g.position.x += Math.sin(loopT * 90) * 0.05; g.rotation.z += Math.sin(loopT * 70) * 0.08; }
+      if (c.kind === 'rotary') c.o.handset.position.y = 0.55 + (ring ? Math.abs(Math.sin(loopT * 30)) * 0.06 : 0);
+      if (c.kind === 'mobile') c.o.screen.material.color.set(ring ? '#ffffff' : '#9fd3ea');
+    });
+    cord.visible = showSatellites;
+    if (showSatellites) { world.updateMatrixWorld(); updateCord(ph); }
+
+    // ---- song scenes
+    lookout.group.visible = presetId === 'lookout';
+    if (lookout.group.visible) {
+      lookout.curtains.forEach(c => { c.pivot.rotation.x = -(0.05 + 0.05 * Math.sin(TAU * (ph * 6 + c.s * 0.2))); c.pivot.rotation.z = 0.03 * Math.sin(TAU * (ph * 4 + c.s * 0.3)); });
+      lookout.fanHead.rotation.y = 0.8 * Math.sin(TAU * ph * 4);
+      lookout.blades.rotation.z = -TAU * ph * 240;
+    }
+    bath.group.visible = presetId === 'bathroom';
+    bath.group.position.copy(bathBase);
+    bath.group.position.y += Math.sin(TAU * ph * 2) * 0.2;
+    bath.group.rotation.z = Math.sin(TAU * (ph + 0.2)) * 0.02;
+    bath.duck.position.y = 0.76 + Math.sin(TAU * ph * 12) * 0.015;
+    bath.duck.rotation.y = Math.sin(TAU * ph * 3) * 0.4;
+
+    pairPos(ph, ppA); pairPos(ph + 0.002, ppB);
+    pairAnchor.position.copy(ppA);
+    ppM.lookAt(ppB, ppA, ppUp); ppQ.setFromRotationMatrix(ppM);
+    pairAnchor.quaternion.copy(ppQ);
+    ppE.set(Math.sin(TAU * ph * 7) * 0.03, Math.sin(TAU * ph * 5) * 0.04, Math.sin(TAU * ph * 3) * 0.03);
+    pairAnchor.quaternion.multiply(ppQ.setFromEuler(ppE));          // a little handheld sway
+    ppSide.set(1, 0, 0).applyQuaternion(pairAnchor.quaternion);
+    const sep = 0.9 + 0.6 * Math.sin(TAU * ph * 6);
+    pair.forEach((b, i) => {
+      const s = i ? 1 : -1;
+      b.g.position.copy(ppA).addScaledVector(ppSide, s * sep);
+      b.g.position.y += s * 0.22 * Math.sin(TAU * ph * 8);
+      b.g.quaternion.copy(pairAnchor.quaternion);
+      const flap = 0.15 + Math.sin(TAU * (ph * 95 + i * 0.37)) * 0.6;
+      b.L.rotation.z = flap; b.R.rotation.z = -flap;
+    });
+
+    ring.path(ringAt(ph), busA); ring.path(ringAt(ph + 0.004), busB);
+    tripBus.position.copy(busA);
+    tripBus.rotation.set(0, Math.atan2(busB.x - busA.x, busB.z - busA.z), 0);
+
+    animateBusStop(busStopG.userData.traffic, ph);
+    animateLuggage(luggageAnim, ph);
 
     // airliner: one lap per loop, high above everything
     planeVis += ((airplaneVisible ? 1 : 0) - planeVis) * kVis;

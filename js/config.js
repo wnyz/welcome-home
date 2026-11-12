@@ -100,7 +100,7 @@ export const TIMES = {
 // Sun height for an hour: 0 at 06:00 and 18:00, 1 at noon, -1 at midnight.
 export const sunHeight = (h) => Math.sin(Math.PI * 2 * (h - 6) / 24);
 
-export const STROKE_MODES = ['stroke', 'reduced', 'none'];
+export const STROKE_MODES = ['stroke', 'reduced', 'none', 'lines'];
 
 export const DEFAULT_STATE = Object.freeze({
   // motion
@@ -137,7 +137,14 @@ export const DEFAULT_STATE = Object.freeze({
   timezone: 0.35,        // (unused now: New York is always 12 h from Taiwan)
   twHour: 7,             // Taiwan local time, 0-23 (New York = +12 h)
   darkness: 0.9,         // how dark night gets (1 = lights almost off)
-  split: 0,              // 0 = blended sky, 1 = sky split down the middle, day | night
+  split: 0,
+  rain: 0.6,             // rain over Taiwan, 0 = none
+  snow: 0.6,             // snow over New York, 0 = none
+  breathe: 0.6,          // islands' soft breathing
+  quake: 0.4,            // houses rising and sinking, a quake wave every 30 s
+  ripple: 0,             // water-ripple distortion over the whole picture
+  rainOn: true,          // weather switches
+  snowOn: true,              // 0 = blended sky, 1 = sky split down the middle, day | night
   windowLight: 0.7,
   clouds: 0.75,          // how many clouds
   cloudDensity: 0.5,

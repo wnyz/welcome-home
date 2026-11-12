@@ -29,16 +29,19 @@ export const shared = {
   // how dark each side is (0 = day, 1 = deep night, lights almost off)
   uNightA: { value: 0 },
   uNightB: { value: 0 },
+  uPxH: { value: 1080 },              // drawing-buffer height, for sizing points
 };
 
 // ---------------------------------------------------------------- toon
 
 const toonVert = /* glsl */`
 varying vec3 vN;
+varying vec3 vNl;
 varying vec3 vLocal;
 varying vec3 vWorld;
 void main() {
   vN = normalize(mat3(modelMatrix) * normal);
+  vNl = normal;   // object-space normal: surface patterns stay put while things turn
   vLocal = position;
   vec4 wp = modelMatrix * vec4(position, 1.0);
   vWorld = wp.xyz;
@@ -53,6 +56,7 @@ uniform float uUseGrad;
 uniform float uTile;
 uniform float uRib;
 uniform float uWin;
+uniform float uPuff;
 uniform float uNightA, uNightB, uTime, uLoop;
 uniform vec3 uLight;
 uniform vec3 uShadow;
@@ -61,6 +65,7 @@ uniform float uTz;
 uniform vec2 uTzX;
 uniform vec3 uTintA, uTintB, uShadowA, uShadowB;
 varying vec3 vN;
+varying vec3 vNl;
 varying vec3 vLocal;
 varying vec3 vWorld;
 void main() {
@@ -69,11 +74,20 @@ void main() {
   if (uUseGrad > 0.5) base = mix(uColorB, uColor, smoothstep(uGrad.x, uGrad.y, vLocal.y));
 
   // tiled facades: a faint grid on vertical faces only
+  vec3 nl = normalize(vNl);
   if (uTile > 0.0) {
-    vec2 q = abs(n.x) > abs(n.z) ? vLocal.zy : vLocal.xy;
+    vec2 q = abs(nl.x) > abs(nl.z) ? vLocal.zy : vLocal.xy;
     vec2 g = abs(fract(q / uTile) - 0.5);
-    float line = step(0.42, max(g.x, g.y)) * (1.0 - abs(n.y));
+    float line = step(0.42, max(g.x, g.y)) * (1.0 - abs(nl.y));
     base = mix(base, base * 0.88, line);
+  }
+
+  // puffy, like a down jacket: soft quilted rows on the sides, each row
+  // lighter in its middle and pinched at its seams
+  if (uPuff > 0.0 && abs(nl.y) < 0.7) {
+    float b = fract(vLocal.y / uPuff);
+    float bulge = sin(b * 3.14159);
+    base = mix(base * 0.74, base * 1.08, pow(bulge, 0.6));
   }
 
   // corrugated metal: soft ribs running along local x
@@ -100,15 +114,32 @@ void main() {
   c = mix(c, c * vec3(0.16, 0.19, 0.36), night * 0.9);
 
   // tower windows: a grid of cells, some of which light up at night
-  if (uWin > 0.0 && abs(n.y) < 0.5) {
-    vec2 q = abs(n.x) > abs(n.z) ? vLocal.zy : vLocal.xy;
-    vec2 cell = floor(q / uWin);
-    vec2 f = abs(fract(q / uWin) - 0.5);
-    float inCell = step(max(f.x, f.y * 0.8), 0.32);
-    float hsh = fract(sin(dot(cell, vec2(12.9898, 78.233)) + n.x * 3.1 + n.z * 7.7) * 43758.5453);
-    float on = step(0.45, hsh) * step(0.5, 0.5 + 0.5 * sin(6.28318 * (uTime / uLoop * (1.0 + floor(hsh * 3.0)) + hsh * 5.0)) + 0.35);
-    vec3 glass = mix(c * 0.82, vec3(1.0, 0.85, 0.55), on * night);
-    c = mix(c, glass, inCell);
+  // tower windows: rows of small single windows with wall between them.
+  // At night about 4 in 10 glow gold, at different brightnesses, and stay
+  // that way; only 1 window in 10 ever changes, once a loop, fading over a
+  // few seconds. Far away (tiny on screen) they blend into a calm texture
+  // instead of shimmering.
+  if (uWin > 0.0 && abs(nl.y) < 0.5) {
+    vec2 q = abs(nl.x) > abs(nl.z) ? vLocal.zy : vLocal.xy;
+    vec2 qc = q / uWin;
+    vec2 cell = floor(qc);
+    vec2 f = abs(fract(qc) - 0.5);
+    vec2 px = fwidth(qc);
+    float aa = smoothstep(0.12, 0.3, max(px.x, px.y));
+    float win = mix(step(f.x, 0.2) * step(f.y, 0.27), 0.22, aa);
+    float face = nl.x * 3.1 + nl.z * 7.7;
+    float h = fract(sin(dot(cell, vec2(12.9898, 78.233)) + face) * 43758.5453);
+    float h2 = fract(h * 37.17 + 0.31);
+    float h3 = fract(h * 91.31 + 0.7);
+    float base = step(0.6, h2);
+    float d = fract(uTime / uLoop - h);
+    float flip = step(0.9, h3) * (smoothstep(0.0, 0.04, d) - smoothstep(0.5, 0.54, d));
+    float on = mix(abs(base - flip), 0.4, aa) * night;
+    float level = mix(0.55 + 0.45 * h2, 0.75, aa);
+    vec3 glass = mix(c, vec3(0.16, 0.24, 0.5), 0.45);
+    float spill = (1.0 - aa) * (1.0 - step(f.x, 0.2) * step(f.y, 0.27)) * smoothstep(0.45, 0.22, max(f.x, f.y)) * on * level * 0.3;
+    c = mix(c, vec3(1.0, 0.76, 0.36), spill);
+    c = mix(c, mix(glass, vec3(1.0, 0.78, 0.38) * level, on), win);
   }
   gl_FragColor = vec4(c, 1.0);
 }`;
@@ -116,8 +147,8 @@ void main() {
 const toonCache = new Map();
 
 export function toon(color, opts = {}) {
-  const { colorB = null, grad = [0, 1], tile = 0, rib = 0, win = 0 } = opts;
-  const key = `${color}|${colorB}|${grad.join(',')}|${tile}|${rib}|${win}`;
+  const { colorB = null, grad = [0, 1], tile = 0, rib = 0, win = 0, puff = 0, doubleSided = false } = opts;
+  const key = `${color}|${colorB}|${grad.join(',')}|${tile}|${rib}|${win}|${puff}|${doubleSided}`;
   if (toonCache.has(key)) return toonCache.get(key);
   const m = new THREE.ShaderMaterial({
     uniforms: {
@@ -128,6 +159,7 @@ export function toon(color, opts = {}) {
       uTile: { value: tile },
       uRib: { value: rib },
       uWin: { value: win },
+      uPuff: { value: puff },
       uNightA: shared.uNightA, uNightB: shared.uNightB,
       uTime: shared.uTime, uLoop: shared.uLoop,
       uLight: shared.uLight,
@@ -139,6 +171,7 @@ export function toon(color, opts = {}) {
     },
     vertexShader: toonVert,
     fragmentShader: toonFrag,
+    side: doubleSided ? THREE.DoubleSide : THREE.FrontSide,
     // push fills back a hair so ink outlines sit cleanly on top
     polygonOffset: true,
     polygonOffsetFactor: 1,
@@ -154,10 +187,15 @@ export const inkLine = new THREE.LineBasicMaterial({ color: C.ink, transparent: 
 const allLines = [];
 
 // Mesh with ink outlines drawn on its hard edges.
+const edgeCache = new Map();
 export function mesh(geo, mat, { edges = true, threshold = 25 } = {}) {
   const m = new THREE.Mesh(geo, mat);
   if (edges) {
-    const l = new THREE.LineSegments(new THREE.EdgesGeometry(geo, threshold), inkLine);
+    // outlines are worked out once per shape and shared
+    const key = `${geo.uuid}|${threshold}`;
+    let eg = edgeCache.get(key);
+    if (!eg) { eg = new THREE.EdgesGeometry(geo, threshold); edgeCache.set(key, eg); }
+    const l = new THREE.LineSegments(eg, inkLine);
     l.userData.ink = true;
     allLines.push(l);
     m.add(l);
@@ -170,8 +208,9 @@ export function mesh(geo, mat, { edges = true, threshold = 25 } = {}) {
 export function setStrokeMode(mode) {
   const none = mode === 'none';
   const reduced = mode === 'reduced';
+  const lines = mode === 'lines';     // outlines only, light on black (the viewer does the fills)
   for (const l of allLines) l.visible = !none;
-  inkLine.color.set(reduced ? '#3c5bc0' : C.ink);
+  inkLine.color.set(lines ? '#f3ead8' : reduced ? '#3c5bc0' : C.ink);
   inkLine.transparent = reduced;
   inkLine.opacity = reduced ? 0.38 : 1;
   inkLine.needsUpdate = true;
@@ -470,28 +509,123 @@ export function billboardMaterial(seed) {
       float h1(float n) { return fract(sin(n * 127.1 + 0.37) * 43758.5453); }
       void main() {
         float ph = uTime / uLoop;
-        float k = 1.0 + floor(h1(uSeed) * 4.0);            // speed: whole cycles per loop
-        float t = TAU * (ph * k + h1(uSeed + 1.3));
-        float mode = floor(h1(uSeed + 2.7) * 4.0);
+        // five gradient formats, all flowing on whole-number loop frequencies
+        float k = 6.0 + floor(h1(uSeed) * 6.0);
+        float mode = floor(h1(uSeed + 2.7) * 5.0);
         vec2 p = vUv;
+        vec2 d = (p - 0.5) * vec2(1.6, 1.0);
         float g;
-        if (mode < 0.5) {                                  // sweeping linear gradient
+        if (mode < 0.5) {                                   // radial ripples from a wandering middle
+          vec2 c = 0.18 * vec2(sin(TAU * (ph + h1(uSeed + 3.1))), 0.7 * cos(TAU * (ph * 2.0 + h1(uSeed + 4.2))));
+          g = length(d - c * vec2(1.6, 1.0)) * 1.3 - ph * k;
+        } else if (mode < 1.5) {                            // diagonal bands sliding across
           float a = TAU * h1(uSeed + 3.1);
-          g = 0.5 + 0.5 * sin(dot(p - 0.5, vec2(cos(a), sin(a))) * 3.0 - t);
-        } else if (mode < 1.5) {                           // breathing radial glow
-          g = smoothstep(0.75, 0.0, length(p - vec2(0.5 + 0.25 * sin(t), 0.5 + 0.2 * cos(t))));
-        } else if (mode < 2.5) {                           // soft drifting bands
-          g = 0.5 + 0.5 * sin((p.y + p.x * 0.4) * 9.0 + t);
-          g = smoothstep(0.2, 0.8, g);
-        } else {                                           // a round shape sliding across
-          float c = length((p - vec2(fract(ph * k + h1(uSeed + 4.2)) * 1.6 - 0.3, 0.5)) * vec2(1.0, 0.8));
-          g = 1.0 - smoothstep(0.26, 0.3, c);
+          g = dot(d, vec2(cos(a), sin(a))) * 1.1 - ph * k;
+        } else if (mode < 2.5) {                            // conic sweep, turning
+          g = atan(d.y, d.x) / TAU * 2.0 - ph * floor(k * 0.5);
+        } else if (mode < 3.5) {                            // soft mesh gradient: two color blobs drifting
+          vec2 b1 = vec2(0.45 * sin(TAU * ph * 2.0), 0.25 * cos(TAU * ph * 3.0));
+          vec2 b2 = vec2(0.45 * cos(TAU * (ph * 3.0 + 0.3)), 0.25 * sin(TAU * (ph * 2.0 + 0.6)));
+          float w1 = exp(-dot(d - b1, d - b1) * 4.0), w2 = exp(-dot(d - b2, d - b2) * 4.0);
+          g = 0.5 * w1 / (w1 + w2 + 0.15) + 0.5;
+          g = g - (w2 / (w1 + w2 + 0.15)) * 0.5;
+        } else {                                            // square ripples, like a tunnel
+          g = max(abs(d.x), abs(d.y)) * 1.4 - ph * k;
         }
-        vec3 col = mix(uA, uB, g);
-        col = mix(col, uC, 0.35 * smoothstep(0.55, 1.0, 1.0 - abs(p.y - 0.5) * 2.0) * (0.5 + 0.5 * sin(t * 2.0 + p.x * 4.0)));
+        float x = 1.0 - abs(fract(g + h1(uSeed + 1.3)) * 2.0 - 1.0);   // 0..1..0
+        if (mode > 2.5 && mode < 3.5) x = clamp(g, 0.0, 1.0);
+        vec3 col = mix(uA, uB, smoothstep(0.0, 0.55, x));
+        col = mix(col, uC, smoothstep(0.5, 1.0, x));
+        if (mode < 0.5 || mode > 3.5) col *= mix(0.5, 1.0, smoothstep(0.0, 0.22, length(d)));   // darker heart
         col *= 0.9 + 0.3 * uLightAmt;
         vec2 e = min(p, 1.0 - p);
         if (min(e.x, e.y) < 0.035) col = uFrame;
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+  });
+}
+
+// Rooftop screens (無眠): dreamier, more moving pictures. Clouds drifting
+// over a gradient sky, a night of twinkling stars with a moon crossing,
+// liquid color blobs, waving aurora curtains, a soft light sweeping across.
+const DREAM_PALETTE = [
+  ['#1c3a9a', '#f6a9b4', '#f7f1e6'],
+  ['#24357f', '#b69ae4', '#f3d600'],
+  ['#0b74cf', '#86cf9e', '#f7f1e6'],
+  ['#3a3f9e', '#ff8a5a', '#ffcf6b'],
+  ['#1d56d6', '#f2a7b8', '#cfe7f5'],
+];
+export function dreamyBoardMaterial(seed) {
+  const pal = DREAM_PALETTE[Math.floor(seed * 991) % DREAM_PALETTE.length];
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: shared.uTime, uLoop: shared.uLoop, uLightAmt: shared.uWindowLight, uFrame: shared.uFrame,
+      uSeed: { value: seed },
+      uA: { value: new THREE.Color(pal[0]) }, uB: { value: new THREE.Color(pal[1]) }, uC: { value: new THREE.Color(pal[2]) },
+    },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */`
+      uniform float uTime, uLoop, uLightAmt, uSeed;
+      uniform vec3 uA, uB, uC, uFrame;
+      varying vec2 vUv;
+      const float TAU = 6.28318530718;
+      float h1(float n) { return fract(sin(n * 127.1 + 0.37) * 43758.5453); }
+      float h2(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      void main() {
+        float ph = uTime / uLoop;
+        vec2 p = vUv;
+        float mode = floor(h1(uSeed + 5.3) * 5.0);
+        vec3 col;
+        if (mode < 0.5) {                                   // clouds drifting over a soft sky
+          col = mix(uB, uA, smoothstep(0.0, 1.0, p.y));
+          float cl = 0.0;
+          for (int i = 0; i < 4; i++) {
+            float fi = float(i);
+            float x = fract(h1(uSeed + fi) + ph * (1.0 + fi)) * 1.6 - 0.3;
+            vec2 d = (p - vec2(x, 0.25 + 0.5 * h1(uSeed + fi * 3.0))) * vec2(1.0, 2.2);
+            cl = max(cl, exp(-dot(d, d) * 18.0) + 0.6 * exp(-dot(d - vec2(0.08, 0.03), d - vec2(0.08, 0.03)) * 30.0));
+          }
+          col = mix(col, uC, smoothstep(0.35, 0.8, cl));
+        } else if (mode < 1.5) {                            // night: stars and a moon crossing
+          col = mix(uA * 0.6, uA, p.y);
+          vec2 g = floor(p * vec2(26.0, 14.0));
+          float st = step(0.9, h2(g + uSeed)) * (0.5 + 0.5 * sin(TAU * (ph * (6.0 + floor(h2(g) * 6.0)) + h2(g + 3.0))));
+          vec2 f = fract(p * vec2(26.0, 14.0)) - 0.5;
+          col += uC * st * smoothstep(0.25, 0.0, length(f)) * 0.9;
+          vec2 mp = vec2(fract(ph + h1(uSeed)) * 1.4 - 0.2, 0.62 + 0.15 * sin(TAU * ph));
+          float md = length((p - mp) * vec2(1.6, 1.0));
+          col = mix(col, uC, smoothstep(0.11, 0.1, md));
+          col += uC * exp(-md * md * 40.0) * 0.25;
+        } else if (mode < 2.5) {                            // liquid color blobs
+          float f = 0.0;
+          for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            vec2 c = vec2(0.5 + 0.35 * sin(TAU * (ph * (1.0 + fi) + h1(uSeed + fi))), 0.5 + 0.3 * cos(TAU * (ph * (2.0 + fi) + h1(uSeed + fi * 2.0))));
+            vec2 d = (p - c) * vec2(1.6, 1.0);
+            f += 0.03 / (dot(d, d) + 0.01);
+          }
+          col = mix(uA, uB, smoothstep(0.6, 1.6, f));
+          col = mix(col, uC, smoothstep(2.4, 3.6, f));
+        } else if (mode < 3.5) {                            // aurora curtains
+          col = uA * 0.7;
+          for (int i = 0; i < 3; i++) {
+            float fi = float(i);
+            float y = 0.45 + 0.12 * fi + 0.08 * sin(p.x * 5.0 + TAU * ph * (2.0 + fi) + fi);
+            float band = exp(-pow((p.y - y) / (0.05 + 0.03 * sin(p.x * 9.0 + TAU * ph * 3.0)), 2.0));
+            col += mix(uB, uC, fi / 2.0) * band * 0.7;
+          }
+        } else {                                            // a soft light sweeping across
+          col = mix(uA, uB, p.x);
+          float x = fract(ph * 4.0 + h1(uSeed));
+          float bar = exp(-pow((p.x - (x * 1.4 - 0.2)) / 0.12, 2.0));
+          col = mix(col, uC, bar * 0.75);
+          col += uC * 0.12 * sin(TAU * (p.y * 3.0 - ph * 8.0));
+        }
+        col *= 0.92 + 0.25 * uLightAmt;
+        vec2 e = min(p, 1.0 - p);
+        if (min(e.x, e.y) < 0.03) col = uFrame;
         gl_FragColor = vec4(col, 1.0);
       }`,
   });
